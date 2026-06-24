@@ -77,7 +77,7 @@ library(dplyr)
 library(lubridate)
 
 # 2. Definir la ruta local exacta de tu archivo
-archivo_local <- "Temporal_extract_V1_3.csv"
+archivo_local <- "Temporal_extract_V1_3_REDUCIDO.csv"
 
 # 3. Validar existencia física del archivo
 if (!file.exists(archivo_local)) {
