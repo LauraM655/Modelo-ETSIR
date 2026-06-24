@@ -1,0 +1,147 @@
+/* 🎨 VARIABLES DE ESTILOS (Modo Claro por Defecto) */
+:root {
+  --primary: #3498db;
+  --secondary: #2c3e50;
+  --accent: #16a085;
+  --bg-light: #f8f9fa;
+  --bg-body: #ffffff;
+  --text-main: #333333;
+  --card-border: #eaeaea;
+  --hover-box: #e8f4fd;
+}
+
+/* 🌙 VARIABLES PARA MODO OSCURO */
+body.dark-mode {
+  --primary: #2980b9;
+  --secondary: #ecf0f1;
+  --accent: #1abc9c;
+  --bg-light: #2c3e50;
+  --bg-body: #1a1a1a;
+  --text-main: #e0e0e0;
+  --card-border: #333333;
+  --hover-box: #34495e;
+}
+
+html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; line-height: 1.75; color: var(--text-main); background-color: var(--bg-body); transition: background-color 0.3s, color 0.3s; }
+h1 { color: var(--secondary); border-bottom: 3px solid var(--primary); padding-bottom: 10px; margin-top: 40px; }
+h2 { color: var(--secondary); margin-top: 30px; }
+h3 { color: var(--accent); margin-top: 25px; font-weight: 600; }
+
+/* 📑 CAJA DE ÍNDICE */
+.index-box {
+  background: var(--bg-light); border-left: 4px solid var(--primary);
+  padding: 15px 20px; margin: 15px 0 25px; border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+}
+.index-box ul { list-style: none; padding-left: 0; margin-bottom: 0; }
+.index-box li { position: relative; margin: 4px 0; }
+
+.index-box a {
+  display: block; padding: 8px 10px; color: var(--secondary);
+  text-decoration: none; border-radius: 4px; transition: all 0.2s; cursor: pointer;
+}
+.index-box a:hover { background: var(--hover-box); color: var(--primary); padding-left: 15px; }
+.index-box a.active { background: var(--primary); color: white; font-weight: 500; }
+
+/* 🔍 EFECTO DESPLEGABLE DE SUBTEMAS AL POSICIONAR EL CURSOR (HOVER) */
+.index-box ul ul {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding-left: 20px;
+  list-style-type: none;
+  transition: all 0.3s ease-in-out; /* Transición suave al abrirse */
+}
+/* Cuando el cursor se para sobre el elemento de lista padre, despliega los hijos */
+.index-box li:hover > ul {
+  max-height: 500px; /* Altura máxima estimada para permitir la animación */
+  opacity: 1;
+  margin-top: 5px;
+  margin-bottom: 5px;
+}
+.index-box ul ul a {
+  font-size: 0.9em; padding: 4px 10px;
+  border-left: 2px solid var(--card-border); border-radius: 0 4px 4px 0;
+}
+.index-box ul ul a:hover { border-left-color: var(--primary); }
+.index-box ul ul a.active { border-left-color: white; background: var(--primary); }
+
+/* 📄 SECCIONES DE CONTENIDO - COMPORTAMIENTO ACORDEÓN */
+.content-card {
+  background: var(--bg-body); padding: 25px; margin-bottom: 30px; border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08); border: 1px solid var(--card-border);
+  display: none;
+  animation: fadeIn 0.3s ease-in;
+}
+.content-card.active { display: block; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.content-card h3 { margin-top: 0; }
+.math { font-size: 1.05em; }
+
+/* 🔄 PESTAÑAS (Bootstrap override) */
+.nav-tabs > li.active > a, .nav-tabs > li.active > a:hover, .nav-tabs > li.active > a:focus {
+  background-color: var(--primary); color: white; border: none; font-weight: 500;
+}
+.nav-tabs > li > a { border: none; color: var(--secondary); padding: 12px 20px; }
+.nav-tabs > li > a:hover { background: var(--hover-box); color: var(--primary); }
+
+/* 🎛️ ESTILOS BOTONES FLOTANTES */
+.action-buttons {
+  position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; gap: 10px;
+}
+.btn-floating {
+  padding: 10px 16px; background-color: var(--secondary); color: var(--bg-body);
+  border: 1px solid var(--card-border); border-radius: 30px; cursor: pointer;
+  font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.15); transition: transform 0.2s, background 0.2s;
+}
+.btn-floating:hover { transform: scale(1.05); background-color: var(--primary); color: white; }
+.btn-pdf { background-color: #e74c3c; color: white; }
+.btn-pdf:hover { background-color: #c0392b; }
+
+/* 🖨️ CONFIGURACIÓN CRUCIAL DE IMPRESIÓN / EXPORTACIÓN A PDF */
+@media print {
+  /* Ocultar botones e índices en el PDF */
+  .action-buttons, .index-box, .nav-tabs { display: none !important; }
+  
+  /* Forzar a que todas las pestañas de Bootstrap se vuelvan visibles */
+  .tab-pane { display: block !important; opacity: 1 !important; visibility: visible !important; }
+  
+  /* Forzar a que todas las tarjetas ocultas se muestren en el PDF consecutivamente */
+  .content-card { 
+    display: block !important; opacity: 1 !important; visibility: visible !important;
+    page-break-inside: avoid; margin-bottom: 20px;
+  }
+  
+  /* Asegurar contraste correcto en impresión */
+  body { background: white !important; color: black !important; }
+  h1, h2, h3 { color: black !important; page-break-after: avoid; }
+}
+
+/* 📱 RESPONSIVE */
+@media (max-width: 768px) {
+  .index-box a { font-size: 0.95em; padding: 6px 10px; }
+  .content-card { padding: 15px; }
+  .action-buttons { position: absolute; top: 10px; right: 10px; }
+}
+
+/* 💻 4. OPTIMIZACIÓN DE CÓDIGO R EN MODO OSCURO */
+body.dark-mode pre, body.dark-mode code {
+  background-color: #242424 !important; color: #a9b7c6 !important;
+  border-color: #333333 !important;
+}
+body.dark-mode .hljs-keyword { color: #cc7832 !important; }
+body.dark-mode .hljs-string { color: #6a8759 !important; }
+body.dark-mode .hljs-number { color: #6897bb !important; }
+body.dark-mode .hljs-comment { color: #808080 !important; font-style: italic; }
+
+/* 🌟 EFECTO FADE-IN SUAVE EN TARJETAS */
+.content-card {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.content-card.active {
+  display: block; opacity: 1; transform: translateY(0);
+}

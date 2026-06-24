@@ -1,0 +1,370 @@
+
+
+::: index-box
+-   [1. llamado de bases de datos](#seccion-1-1)
+:::
+
+::: {#seccion-1-1 .content-card}
+
+###  Carga y Filtrado Automatizado de Datos (OpenDengue) de Sudamérica/Latinoamérica (Costa Rica, Rep. Dominicana, Colombia, Honduras, México) (PAHO)
+
+
+<!-- Para garantizar la resolución semanal estricta de los últimos 11 años, se realiza una consulta directa a la API de Delphi Epidata, la cual extrae los registros oficiales de la OPS sincronizados por Semana Epidemiológica. -->
+
+```{r carga-datos-api, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+# 1. Instalar e importar la librería oficial si no está instalada
+if (!requireNamespace("epidatr", quietly = TRUE)) {
+  install.packages("epidatr")
+}
+library(epidatr)
+library(dplyr)
+library(purrr)
+library(lubridate) # Necesaria para extraer año y semana de la fecha
+
+# 2. Definir códigos geográficos ISO de la OPS para la API de Delphi
+# Formato requerido por la API para los 5 países seleccionados
+codigos_paises <- c("cr", "do", "co", "hn", "mx") 
+
+# 3. Definir el rango de Semanas Epidemiológicas 
+# Formato de la API: AAAASS (Año de 4 dígitos + Semana de 2 dígitos)
+rango_semanas <- epirange(201301, 202152)
+
+# 4. Descargar los datos iterando de manera segura sobre los países elegidos
+dengue_api_raw <- codigos_paises %>%
+  map_dfr(function(codigo) {
+    tryCatch({
+      pub_paho_dengue(regions = codigo, epiweeks = rango_semanas)
+    }, error = function(e) {
+      message(paste("Error descargando región:", codigo, "-", e$message))
+      return(NULL)
+    })
+  })
+
+# 5. Formatear y traducir variables asegurando la coincidencia de mayúsculas
+dengue_semanal <- dengue_api_raw %>%
+  transmute(
+    pais = case_when(
+      toupper(region) == "CR" ~ "Costa Rica",
+      toupper(region) == "DO" ~ "República Dominicana",
+      toupper(region) == "CO" ~ "Colombia",
+      toupper(region) == "HN" ~ "Honduras",
+      toupper(region) == "MX" ~ "México"
+    ),
+    codigo_iso = toupper(region),
+    fecha_semana = epiweek,                      
+    anio = year(epiweek),                        
+    semana = epiweek(epiweek),                   
+    casos_totales = num_dengue,                  
+    casos_graves = num_severe,                   
+    defunciones = num_deaths,                    
+    poblacion_total = total_pop                  
+  ) %>%
+  arrange(pais, fecha_semana)
+
+# 6. Desplegar muestra interactiva adaptada al tema Flatly
+knitr::kable(head(dengue_semanal, 12), 
+             caption = "Series de tiempo semanales obtenidas vía API Delphi (PAHO Dengue) para el Módulo I")
+summary(dengue_semanal)
+```
+
+
+Para asegurar la reproducibilidad del modelo y evitar fallos por conexiones de red externas, se realiza la lectura local del extracto temporal estandarizado del consorcio OpenDengue, aislando los registros semanales de interés.
+
+```{r carga-datos-local, message=FALSE, warning=FALSE, paged.print=TRUE}
+# 1. Cargar librerías esenciales
+library(readr)
+library(dplyr)
+library(lubridate)
+
+# 2. Definir la ruta local exacta de tu archivo
+archivo_local <- "Temporal_extract_V1_3.csv"
+
+# 3. Validar existencia física del archivo
+if (!file.exists(archivo_local)) {
+  stop(paste("¡Error crítico! El archivo", archivo_local, "no se encuentra en el directorio."))
+}
+
+# 4. Leer la base de datos local
+dengue_raw_ops <- read_csv(archivo_local, show_col_types = FALSE)
+
+# 5. Definir los códigos ISO exactos de 3 letras
+codigos_iso_interes <- c("CRI", "DOM", "COL", "HND", "MEX")
+
+# 6. Pipeline de Limpieza Extrema de Espacios, Filtrado e Inserción de Filas
+dengue_semanal <- dengue_raw_ops %>%
+  # CRUCIAL: Eliminar espacios invisibles que tengan los textos a los lados en el CSV original
+  mutate(
+    ISO_A0_limpio = trimws(toupper(ISO_A0)),
+    adm_0_name_limpio = trimws(adm_0_name)
+  ) %>%
+  # Filtrar usando la columna de códigos limpios sin espacios fantasmas
+  filter(ISO_A0_limpio %in% codigos_iso_interes) %>%
+  # Limitar la ventana temporal requerida (2014-2025)
+  filter(Year >= 2014 & Year <= 2026) %>%
+  # Crear la etiqueta del país basada en su código de 3 letras limpio
+  mutate(
+    pais = case_when(
+      ISO_A0_limpio == "CRI" ~ "Costa Rica",
+      ISO_A0_limpio == "DOM" ~ "República Dominicana",
+      ISO_A0_limpio == "COL" ~ "Colombia",
+      ISO_A0_limpio == "HND" ~ "Honduras",
+      ISO_A0_limpio == "MEX" ~ "México"
+    )
+  ) %>%
+  # Agrupar por país e ISO para colapsar todas las hileras municipales en conteos nacionales
+  group_by(pais, ISO_A0_limpio, calendar_start_date, Year) %>%
+  summarise(
+    casos_totales = sum(dengue_total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Dar formato final y orden estructurado a las columnas para Laura
+  transmute(
+    pais = pais,
+    codigo_iso = ISO_A0_limpio,
+    fecha_semana = calendar_start_date,
+    anio = as.integer(Year),
+    # Calcular la semana epidemiológica basada en la fecha de inicio
+    semana = as.integer(floor((calendar_start_date - make_date(Year, 1, 1)) / 7) + 1),
+    casos_totales = casos_totales
+  ) %>%
+  arrange(pais, fecha_semana)
+
+# 7. Imprimir resumen de verificación en la consola de RStudio
+print(summary(dengue_semanal))
+
+# Instalar e importar kableExtra si no está en el sistema
+if (!requireNamespace("kableExtra", quietly = TRUE)) install.packages("kableExtra")
+library(kableExtra)
+
+# Renderizar los primeros 12 registros de forma estética y responsiva
+dengue_semanal %>%
+  head(12) %>%
+  kbl(
+    caption = "Series semanales consolidadas a nivel nacional (2014-2025)",
+    col.names = c("País", "Código ISO", "Fecha Reporte", "Año", "Semana Epi.", "Casos Totales"),
+    align = c("l", "c", "c", "c", "c", "r"),
+    format = "html"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    position = "center",
+    font_size = 14
+  ) %>%
+  row_spec(0, bold = TRUE, color = "#ffffff", background = "#2c3e50") %>% # Color primario Flatly
+  column_spec(1, bold = TRUE) %>%
+  column_spec(6, bold = TRUE, color = "#e74c3c") %>%                     # Resalta los casos totales
+  collapse_rows(columns = 1:2, valign = "top")                            # Colapsa las celdas de país repetidas
+```
+
+#### 📈 Tendencia Histórica de Transmisión por País (2014-2024)
+
+```{r grafico-curva-historica, fig.width=11, fig.height=10, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# 1. Definir la paleta cromática profesional para los 5 países bajo estudio
+paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
+names(paleta_paises) <- c("Costa Rica", "República Dominicana", "Colombia", "Honduras", "México")
+
+# 2. Duplicar los datos para crear el panel virtual de superposición
+dengue_grilla <- bind_rows(
+  # Datos originales para los 5 paneles individuales
+  dengue_semanal %>% mutate(panel_facet = pais),
+  # Datos duplicados que irán todos juntos al sexto panel
+  dengue_semanal %>% mutate(panel_facet = "Todos los Países (Superposición)")
+)
+
+# 3. Forzar el orden de los paneles para que la superposición quede al final (abajo a la derecha)
+orden_paneles <- c("Costa Rica", "República Dominicana", "Colombia", "Honduras", "México", "Todos los Países (Superposición)")
+
+# 4. Construir el gráfico unificado
+ggplot(dengue_grilla, aes(x = fecha_semana, y = casos_totales, color = pais, group = interaction(pais, panel_facet))) +
+  # Capa de área con transparencias
+  geom_area(aes(fill = pais), alpha = 0.15, position = "identity", color = NA) +
+  # Capa de líneas continuas
+  geom_line(size = 0.75, alpha = 0.85) +
+  # Facetado en grilla de 2 columnas (escalas independientes para apreciar curvas locales y globales)
+  facet_wrap(~panel_facet, scales = "free_y", ncol = 2) + 
+  # Aplicar colores consistentes mapeados por nombre de país
+  scale_color_manual(values = paleta_paises) +
+  scale_fill_manual(values = paleta_paises) +
+  # Formatear ejes
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title = "Dinámica Temporal de Transmisión de Dengue en América Latina",
+    subtitle = "Casos semanales por país y comparativa de superposición directa (2014 - 2025)",
+    x = "Año de Reporte",
+    y = "Número Total de Casos Semanales",
+    color = "País:",
+    fill = "País:",
+    caption = "Fuente: Réplica de Artículo / Datos procesados de OpenDengue v1.3"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    # Mostramos la leyenda abajo únicamente para identificar las curvas del sexto panel
+    legend.position = "bottom", 
+    plot.title = element_text(face = "bold", color = "#2c3e50", size = 15),
+    plot.subtitle = element_text(color = "#7f8c8d", margin = margin(b = 15)),
+    strip.background = element_rect(fill = "#ecf0f1", color = NA),
+    strip.text = element_text(face = "bold", color = "#2c3e50"),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1.5, "lines"),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+#### 📅 Análisis de Estacionalidad Mensual
+
+```{r grafico-estacionalidad, fig.width=11, fig.height=10, message=FALSE, warning=FALSE}
+# Agregar columna de meses para la evaluación estacional
+dengue_estacional <- dengue_semanal %>%
+  mutate(mes = month(fecha_semana, label = TRUE, abbr = TRUE))
+
+ggplot(dengue_estacional, aes(x = mes, y = casos_totales, fill = pais)) +
+  geom_boxplot(alpha = 0.75, outlier.color = "#e74c3c", outlier.size = 1, outlier.alpha = 0.5) +
+  facet_wrap(~pais, scales = "free_y", ncol = 3) +
+  scale_fill_manual(values = paleta_paises) +
+  labs(
+    title = "Comportamiento y Distribución Estacional de Brotes",
+    subtitle = "Variabilidad del volumen de casos agrupados por mes calendario",
+    x = "Mes del Año",
+    y = "Distribución de Casos Semanales"
+  ) +
+  theme_light(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    strip.background = element_rect(fill = "#34495e"),
+    strip.text = element_text(color = "#ffffff", face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+```
+
+
+### Integración de Datos Ambientales (NASA POWER)
+
+A continuación, se realiza la extracción automatizada de registros diarios de temperatura (°C) mediante la API de la NASA, calculando indicadores continuos acumulados en ventanas móviles de $K_T$ días para acoplarlos con las series epidemiológicas.
+
+```{r carga-temperatura, message=FALSE, warning=FALSE}
+# 1. Instalar e importar las librerías necesarias
+if (!requireNamespace("nasapower", quietly = TRUE)) install.packages("nasapower")
+library(nasapower)
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(zoo)     # Librería fundamental para calcular las ventanas móviles (rollapply)
+library(ggplot2)
+
+# 2. Definir coordenadas geográficas centrales (Capitales o áreas endémicas)
+coordenadas_paises <- list(
+  "Costa Rica"           = c(lon = -84.08, lat = 9.93),   # San José
+  "República Dominicana" = c(lon = -69.93, lat = 18.48),  # Santo Domingo
+  "Colombia"             = c(lon = -74.08, lat = 4.60),   # Bogotá / Centro
+  "Honduras"             = c(lon = -87.20, lat = 14.10),  # Tegucigalpa
+  "México"               = c(lon = -99.13, lat = 19.43)   # CDMX / Eje Central
+)
+
+# 3. Definir la ventana temporal exacta de tus datos de dengue (2014-01-01 a 2024-12-31)
+fecha_inicio <- "2014-01-01"
+fecha_fin    <- "2024-12-31"
+
+# 4. Definir el tamaño de la ventana temporal K_T (Ejemplo: 14 días)
+K_T <- 14 
+
+
+# 5. Iterar sobre los países y descargar datos diarios de temperatura
+temperatura_diaria_raw <- names(coordenadas_paises) %>%
+  map_dfr(function(nom_pais) {
+    coords <- coordenadas_paises[[nom_pais]]
+    tryCatch({
+      # get_power extrae la temperatura promedio a 2 metros (T2M)
+      data_nasa <- get_power(
+        community = "ag",
+        lonlat = c(coords["lon"], coords["lat"]),
+        pars = "T2M",
+        dates = c(fecha_inicio, fecha_fin),
+        temporal_api = "daily"
+      )
+      
+      # Estructurar el dataframe de salida por país
+      data_nasa %>%
+        transmute(
+          pais = nom_pais,
+          fecha = as.Date(YYYYMMDD),
+          temp_promedio = T2M
+        )
+    }, error = function(e) {
+      message(paste("Error en la descarga para:", nom_pais, "-", e$message))
+      return(NULL)
+    })
+  })
+
+# 6. Calcular acumulados/promedios en ventanas de K_T días
+temperatura_procesada <- temperatura_diaria_raw %>%
+  group_by(pais) %>%
+  arrange(fecha) %>%
+  mutate(
+    # 'align = right' asegura que se miren solo los K_T días ANTES de la fecha actual
+    temp_acumulada_KT = rollapply(temp_promedio, width = K_T, FUN = sum, fill = NA, align = "right"),
+    temp_promedio_KT  = rollapply(temp_promedio, width = K_T, FUN = mean, fill = NA, align = "right")
+  ) %>%
+  ungroup()
+
+# 7. Sincronizar datos DIARIOS a datos SEMANALES de Dengue (Matching por fecha)
+# OpenDengue registra el 'calendar_start_date'. Buscaremos la temperatura exacta de ese día.
+datos_fusionados <- dengue_semanal %>%
+  left_join(temperatura_procesada, by = c("pais" = "pais", "fecha_semana" = "fecha"))
+
+# 8. Imprimir verificación del acoplamiento en consola
+print(summary(datos_fusionados))
+```
+
+####  Correlación entre Temperatura Acumulada ($K_T$) y Casos de Dengue
+
+```{r grafico-correlacion, fig.width=11, fig.height=6, message=FALSE, warning=FALSE}
+paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
+
+ggplot(datos_fusionados %>% filter(!is.na(temp_promedio_KT)), 
+       aes(x = temp_promedio_KT, y = casos_totales, color = pais)) +
+  # Puntos con transparencia para evitar el solapamiento visual denso
+  geom_point(alpha = 0.4, size = 1.5) +
+  # Línea de tendencia geométrica no lineal (GAM) para capturar el comportamiento biológico
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), size = 1.2, se = FALSE) +
+  facet_wrap(~pais, scales = "free", ncol = 5) + # Paneles independientes por país en una sola línea
+  scale_color_manual(values = paleta_paises) +
+  scale_y_log10(labels = scales::comma_format()) + # Escala logarítmica para manejar picos epidémicos
+  labs(
+    title = "Efecto de la Temperatura sobre la Dinámica de Contagio",
+    subtitle = paste("Relación entre la temperatura promedio móvil (Ventana K_T =", K_T, "días) y casos semanales (Eje Y Log10)"),
+    x = "Temperatura Promedio en Ventana K_T (°C)",
+    y = "Casos Totales Semanales (Escala Logarítmica)",
+    caption = "Fuente: Réplica de Artículo / Datos combinados de OpenDengue v1.3 y NASA POWER API"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    plot.subtitle = element_text(color = "#7f8c8d"),
+    strip.background = element_rect(fill = "#34495e", color = NA),
+    strip.text = element_text(color = "#ffffff", face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+
+### pause
+
+:::
+
+
+::: {#seccion-1-2 .content-card}
+
+### pausa
+
+:::
+
