@@ -75,6 +75,7 @@ Para asegurar la reproducibilidad del modelo y evitar fallos por conexiones de r
 library(readr)
 library(dplyr)
 library(lubridate)
+library(zoo)
 
 # 2. Definir la ruta local exacta de tu archivo
 archivo_local <- "Temporal_extract_V1_3_REDUCIDO.csv"
@@ -123,11 +124,40 @@ dengue_semanal <- dengue_raw_ops %>%
     codigo_iso = ISO_A0_limpio,
     fecha_semana = calendar_start_date,
     anio = as.integer(Year),
-    # Calcular la semana epidemiológica basada en la fecha de inicio
-    semana = as.integer(floor((calendar_start_date - make_date(Year, 1, 1)) / 7) + 1),
     casos_totales = casos_totales
   ) %>%
   arrange(pais, fecha_semana)
+
+# Recalcular fechas de inicio de semana basándose en MMWR
+library(MMWRweek)
+
+dengue_semanal <- dengue_semanal %>%
+  mutate(
+    semana_epi = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi = MMWRweek(fecha_semana)$MMWRyear,
+    # Calcular fecha CORRECTA de inicio de semana MMWR (domingo)
+    fecha_semana_correcta = MMWRweek2Date(anio_epi, semana_epi)
+  ) %>%
+  # Reemplazar fecha original con la correcta
+  mutate(fecha_semana = fecha_semana_correcta) %>%
+  select(-fecha_semana_correcta)
+
+# ==============================================================================
+# CORRECCIÓN DE VARIABLES DE REZAGO Y VENTANAS MÓVILES MULTI-PAÍS
+# ==============================================================================
+
+ # Acumulado de casos pasados (K_I semanas, típicamente 4-12 semanas)
+    K_I <- 8 # Ejemplo: 8 semanas de inmunidad/vigilancia
+    
+dengue_semanal <- dengue_semanal %>%
+  mutate(
+    # AJUSTE CRÍTICO: Factor de subregistro del 4% para Latinoamérica
+    I_t_ajustado = casos_totales * 25,
+    # Variable de rezago para el modelo ETSIR (necesaria para I_{t-1})
+    I_t_1 = lag(I_t_ajustado, 1),
+   
+    acumulado_casos_KI = rollapply(I_t_ajustado, width = K_I, FUN = sum, fill = NA, align = "right")
+  )
 
 # 7. Imprimir resumen de verificación en la consola de RStudio
 print(summary(dengue_semanal))
@@ -136,25 +166,27 @@ print(summary(dengue_semanal))
 if (!requireNamespace("kableExtra", quietly = TRUE)) install.packages("kableExtra")
 library(kableExtra)
 
-# Renderizar los primeros 12 registros de forma estética y responsiva
+# Renderizar los primeros 12 registros incluyendo las nuevas métricas ajustadas
 dengue_semanal %>%
   head(12) %>%
   kbl(
-    caption = "Series semanales consolidadas a nivel nacional (2014-2025)",
-    col.names = c("País", "Código ISO", "Fecha Reporte", "Año", "Semana Epi.", "Casos Totales"),
-    align = c("l", "c", "c", "c", "c", "r"),
+    caption = "Series semanales consolidadas y ajustadas por subregistro (2014-2026)",
+    # CORREGIDO: Ahora el vector mapea exactamente las 10 columnas reales del objeto
+    col.names = c("País", "Código ISO", "Fecha Reporte", "Año", "Casos Brutos", "Semana Epi.", "Año Epi.", "I_t Ajustado", "I_{t-1}", "Acumulado K_I"),
+    align = c("l", "c", "c", "c", "r", "c", "c", "r", "r", "r"),
     format = "html"
   ) %>%
   kable_styling(
     bootstrap_options = c("striped", "hover", "condensed", "responsive"),
     full_width = TRUE,
     position = "center",
-    font_size = 14
+    font_size = 13
   ) %>%
-  row_spec(0, bold = TRUE, color = "#ffffff", background = "#2c3e50") %>% # Color primario Flatly
+  row_spec(0, bold = TRUE, color = "#ffffff", background = "#2c3e50") %>% 
   column_spec(1, bold = TRUE) %>%
-  column_spec(6, bold = TRUE, color = "#e74c3c") %>%                     # Resalta los casos totales
-  collapse_rows(columns = 1:2, valign = "top")                            # Colapsa las celdas de país repetidas
+  column_spec(5, color = "#7f8c8d") %>% # Casos brutos en tono gris suave
+  column_spec(8, bold = TRUE, color = "#e74c3c") %>% # Resalta el impacto real ajustado en rojo
+  collapse_rows(columns = 1:2, valign = "top")
 ```
 
 #### 📈 Tendencia Histórica de Transmisión por País (2014-2024)
@@ -246,57 +278,63 @@ ggplot(dengue_estacional, aes(x = mes, y = casos_totales, fill = pais)) +
 ```
 
 
-### Integración de Datos Ambientales (NASA POWER)
 
-A continuación, se realiza la extracción automatizada de registros diarios de temperatura (°C) mediante la API de la NASA, calculando indicadores continuos acumulados en ventanas móviles de $K_T$ días para acoplarlos con las series epidemiológicas.
+###  Integración de Datos de Precipitación y Temperatura (NASA POWER)
 
-```{r carga-temperatura, message=FALSE, warning=FALSE}
-# 1. Instalar e importar las librerías necesarias
-if (!requireNamespace("nasapower", quietly = TRUE)) install.packages("nasapower")
+A continuación, se realiza la extracción automatizada de registros diarios de precipitación (mm) y temperatura (°C) mediante la API de la NASA, calculando indicadores continuos acumulados en ventanas móviles de $K_P$ y $K_T$ días para acoplarlos con las series epidemiológicas.
+
+
+Para evitar sesgos biológicos, se calculan las ventanas móviles completas de Temperatura ($K_7$ a $K_{150}$) y Precipitación ($K_7$ a $K_{60}$) a nivel diario. Posteriormente, se sincronizan con las semanas epidemiológicas (MMWRweek) extrayendo el registro del último día de la semana, dejando la matriz lista para la optimización por el método MSA.
+
+
+```{r carga-clima-completo, message=FALSE, warning=FALSE}
+# 1. Cargar librerías necesarias
 library(nasapower)
 library(dplyr)
 library(purrr)
 library(lubridate)
-library(zoo)     # Librería fundamental para calcular las ventanas móviles (rollapply)
+library(zoo)     # Fundamental para ventanas móviles (rollapply)
 library(ggplot2)
+library(scales)
 
 # 2. Definir coordenadas geográficas centrales (Capitales o áreas endémicas)
 coordenadas_paises <- list(
-  "Costa Rica"           = c(lon = -84.08, lat = 9.93),   # San José
-  "República Dominicana" = c(lon = -69.93, lat = 18.48),  # Santo Domingo
-  "Colombia"             = c(lon = -74.08, lat = 4.60),   # Bogotá / Centro
-  "Honduras"             = c(lon = -87.20, lat = 14.10),  # Tegucigalpa
-  "México"               = c(lon = -99.13, lat = 19.43)   # CDMX / Eje Central
+  "Costa Rica"           = c(lon = -84.08, lat = 9.93),   
+  "República Dominicana" = c(lon = -69.93, lat = 18.48),  
+  "Colombia"             = c(lon = -74.08, lat = 4.60),   
+  "Honduras"             = c(lon = -87.20, lat = 14.10),  
+  "México"               = c(lon = -99.13, lat = 19.43)   
 )
 
-# 3. Definir la ventana temporal exacta de tus datos de dengue (2014-01-01 a 2024-12-31)
+# 3. Definir la ventana temporal exacta de tus datos de dengue
 fecha_inicio <- "2014-01-01"
 fecha_fin    <- "2024-12-31"
 
-# 4. Definir el tamaño de la ventana temporal K_T (Ejemplo: 14 días)
-K_T <- 14 
+# 4. Definir las ventanas temporales independientes para tu modelo estadístico
+# En lugar de K_T y K_P fijos, crear múltiples ventanas:
+K_T_values <- c(7, 14, 30, 60, 90, 120, 150) # Rango plausible
+K_P_values <- c(7, 14, 21, 30, 45, 60)
 
-
-# 5. Iterar sobre los países y descargar datos diarios de temperatura
-temperatura_diaria_raw <- names(coordenadas_paises) %>%
+# 5. Iterar sobre los países y descargar datos diarios de Temperatura (T2M) y Precipitación (PRECTOTCORR)
+clima_diario_raw <- names(coordenadas_paises) %>%
   map_dfr(function(nom_pais) {
     coords <- coordenadas_paises[[nom_pais]]
     tryCatch({
-      # get_power extrae la temperatura promedio a 2 metros (T2M)
+      # Solicitamos T2M (Temperatura) y PRECTOTCORR (Precipitación en mm/día)
       data_nasa <- get_power(
         community = "ag",
         lonlat = c(coords["lon"], coords["lat"]),
-        pars = "T2M",
+        pars = c("T2M", "PRECTOTCORR"),
         dates = c(fecha_inicio, fecha_fin),
         temporal_api = "daily"
       )
       
-      # Estructurar el dataframe de salida por país
       data_nasa %>%
         transmute(
           pais = nom_pais,
           fecha = as.Date(YYYYMMDD),
-          temp_promedio = T2M
+          temperatura = T2M,
+          precipitacion = PRECTOTCORR # Lluvia en mm diarios
         )
     }, error = function(e) {
       message(paste("Error en la descarga para:", nom_pais, "-", e$message))
@@ -304,24 +342,88 @@ temperatura_diaria_raw <- names(coordenadas_paises) %>%
     })
   })
 
-# 6. Calcular acumulados/promedios en ventanas de K_T días
-temperatura_procesada <- temperatura_diaria_raw %>%
+# 6. Calcular acumulados y promedios en ventanas de tiempo independientes (K_T y K_P)
+clima_procesado <- clima_diario_raw %>%
   group_by(pais) %>%
   arrange(fecha) %>%
   mutate(
-    # 'align = right' asegura que se miren solo los K_T días ANTES de la fecha actual
-    temp_acumulada_KT = rollapply(temp_promedio, width = K_T, FUN = sum, fill = NA, align = "right"),
-    temp_promedio_KT  = rollapply(temp_promedio, width = K_T, FUN = mean, fill = NA, align = "right")
+    # Crear columnas para cada K_T
+    temp_K7 = rollapply(temperatura, width = 7, FUN = mean, fill = NA, align = "right"),
+    temp_K14 = rollapply(temperatura, width = 14, FUN = mean, fill = NA, align = "right"),
+    temp_K30 = rollapply(temperatura, width = 30, FUN = mean, fill = NA, align = "right"),
+    temp_K60 = rollapply(temperatura, width = 60, FUN = mean, fill = NA, align = "right"),
+    temp_K90 = rollapply(temperatura, width = 90, FUN = mean, fill = NA, align = "right"),
+    temp_K120 = rollapply(temperatura, width = 120, FUN = mean, fill = NA, align = "right"),
+    temp_K150 = rollapply(temperatura, width = 150, FUN = mean, fill = NA, align = "right"),
+    
+    # Crear columnas para cada K_P
+    precip_K7 = rollapply(precipitacion, width = 7, FUN = sum, fill = NA, align = "right"),
+    precip_K14 = rollapply(precipitacion, width = 14, FUN = sum, fill = NA, align = "right"),
+    precip_K21 = rollapply(precipitacion, width = 21, FUN = sum, fill = NA, align = "right"),
+    precip_K30 = rollapply(precipitacion, width = 30, FUN = sum, fill = NA, align = "right"),
+    precip_K45 = rollapply(precipitacion, width = 45, FUN = sum, fill = NA, align = "right"),
+    precip_K60 = rollapply(precipitacion, width = 60, FUN = sum, fill = NA, align = "right")
   ) %>%
   ungroup()
 
-# 7. Sincronizar datos DIARIOS a datos SEMANALES de Dengue (Matching por fecha)
-# OpenDengue registra el 'calendar_start_date'. Buscaremos la temperatura exacta de ese día.
-datos_fusionados <- dengue_semanal %>%
-  left_join(temperatura_procesada, by = c("pais" = "pais", "fecha_semana" = "fecha"))
+# Instalar paquete MMWRweek si no lo tienes
+if (!requireNamespace("MMWRweek", quietly = TRUE)) install.packages("MMWRweek")
+library(MMWRweek)
 
-# 8. Imprimir verificación del acoplamiento en consola
-print(summary(datos_fusionados))
+dengue_semanal <- dengue_semanal %>%
+  mutate(
+    # Calcular semana epidemiológica CORRECTA
+    semana_epi = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi = MMWRweek(fecha_semana)$MMWRyear
+  )
+
+# 7. Sincronizar datos CLIMÁTICOS con las series semanales de Dengue (Matching por fecha de inicio de semana)
+clima_semanal <- clima_procesado %>%
+  mutate(
+    semana_epi = MMWRweek(fecha)$MMWRweek,
+    anio_epi = MMWRweek(fecha)$MMWRyear
+  ) %>%
+  group_by(pais, anio_epi, semana_epi) %>%
+  summarise(
+    # Promedio de las ventanas K dentro de la semana
+    temp_K7 = mean(temp_K7, na.rm = TRUE),
+    temp_K14 = mean(temp_K14, na.rm = TRUE),
+    temp_K30 = mean(temp_K30, na.rm = TRUE),
+    temp_K60 = mean(temp_K60, na.rm = TRUE),
+    temp_K90 = mean(temp_K90, na.rm = TRUE),
+    temp_K120 = mean(temp_K120, na.rm = TRUE),
+    temp_K150 = mean(temp_K150, na.rm = TRUE),
+    
+    precip_K7 = mean(precip_K7, na.rm = TRUE),
+    precip_K14 = mean(precip_K14, na.rm = TRUE),
+    precip_K21 = mean(precip_K21, na.rm = TRUE),
+    precip_K30 = mean(precip_K30, na.rm = TRUE),
+    precip_K45 = mean(precip_K45, na.rm = TRUE),
+    precip_K60 = mean(precip_K60, na.rm = TRUE),
+    
+    # Variables diarias para EDA
+    temp_diaria_promedio = mean(temperatura, na.rm = TRUE),
+    precip_diaria_suma = sum(precipitacion, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 4. ENLACE MAESTRO MULTIESCALA (Join por Llaves Epidemiológicas)
+datos_master <- dengue_semanal %>%
+  left_join(clima_semanal, by = c("pais" = "pais", "anio_epi" = "anio_epi", "semana_epi" = "semana_epi"))
+
+# El artículo (Sección 4.1) dice: "For some regions, a small amount of precipitation data is missing. For those missing values, we replace them with the mean value of the same year."
+datos_master <- datos_master %>%
+  group_by(pais, anio_epi) %>%
+  mutate(
+    # Regla del artículo: reemplazar NAs con media anual
+    across(starts_with("precip_K"), ~ifelse(is.na(.), mean(., na.rm = TRUE), .)),
+    across(starts_with("temp_K"), ~ifelse(is.na(.), mean(., na.rm = TRUE), .))
+  ) %>%
+  ungroup()
+
+# 8. Imprimir verificación del acoplamiento en la consola de RStudio
+print("Estructura de la Matriz Maestra Final (Dengue + Temperatura + Precipitación):")
+print(summary(datos_master))
 ```
 
 ####  Correlación entre Temperatura Acumulada ($K_T$) y Casos de Dengue
@@ -329,8 +431,8 @@ print(summary(datos_fusionados))
 ```{r grafico-correlacion, fig.width=11, fig.height=6, message=FALSE, warning=FALSE}
 paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
 
-ggplot(datos_fusionados %>% filter(!is.na(temp_promedio_KT)), 
-       aes(x = temp_promedio_KT, y = casos_totales, color = pais)) +
+ggplot(datos_master %>% filter(!is.na(temp_K7)), 
+       aes(x = temp_K7, y = I_t_ajustado, color = pais)) +
   # Puntos con transparencia para evitar el solapamiento visual denso
   geom_point(alpha = 0.4, size = 1.5) +
   # Línea de tendencia geométrica no lineal (GAM) para capturar el comportamiento biológico
@@ -340,7 +442,7 @@ ggplot(datos_fusionados %>% filter(!is.na(temp_promedio_KT)),
   scale_y_log10(labels = scales::comma_format()) + # Escala logarítmica para manejar picos epidémicos
   labs(
     title = "Efecto de la Temperatura sobre la Dinámica de Contagio",
-    subtitle = paste("Relación entre la temperatura promedio móvil (Ventana K_T =", K_T, "días) y casos semanales (Eje Y Log10)"),
+    subtitle = paste("Relación entre la temperatura promedio móvil (Ventana K_T =", 7, "días) y casos semanales (Eje Y Log10)"),
     x = "Temperatura Promedio en Ventana K_T (°C)",
     y = "Casos Totales Semanales (Escala Logarítmica)",
     caption = "Fuente: Réplica de Artículo / Datos combinados de OpenDengue v1.3 y NASA POWER API"
@@ -354,8 +456,80 @@ ggplot(datos_fusionados %>% filter(!is.na(temp_promedio_KT)),
     strip.text = element_text(color = "#ffffff", face = "bold"),
     panel.spacing = unit(1, "lines")
   )
+
+
 ```
 
+####  Relación entre Precipitación Acumulada ($K_P$) y Dinámica de Transmisión
+
+```{r grafico-correlacion-lluvia, fig.width=11, fig.height=6, message=FALSE, warning=FALSE}
+paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
+
+ggplot(datos_master %>% filter(!is.na(precip_K7)), 
+       aes(x = precip_K7, y = I_t_ajustado, color = pais)) +
+  # Puntos con transparencia para observar la densidad de las semanas epidemiológicas
+  geom_point(alpha = 0.4, size = 1.5) +
+  # Ajuste no lineal suavizado (LOESS) para capturar el umbral óptimo de lluvias
+  geom_smooth(method = "loess", size = 1.2, se = FALSE) +
+  facet_wrap(~pais, scales = "free", ncol = 5) + 
+  scale_color_manual(values = paleta_paises) +
+  scale_y_log10(labels = comma_format()) + 
+  labs(
+    title = "Efecto de la Precipitación sobre la Dinámica de Contagio",
+    subtitle = paste("Relación entre la lluvia acumulada (Ventana K_P =", 7, "días) y casos semanales (Eje Y Log10)"),
+    x = "Precipitación Acumulada en Ventana K_P (mm)",
+    y = "Casos Totales Semanales (Escala Logarítmica)",
+    caption = "Fuente: Réplica de Artículo / Datos combinados de OpenDengue v1.3 y NASA POWER API"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    plot.subtitle = element_text(color = "#7f8c8d"),
+    strip.background = element_rect(fill = "#2c3e50", color = NA),
+    strip.text = element_text(color = "#ffffff", face = "bold"),
+    panel.spacing = unit(1, "lines")
+  )
+
+```
+
+### Validación de series continuas
+
+El modelo ETSIR requiere series continuas. Si faltan semanas, el cálculo de $I_{t-1}$ fallará.
+
+```{r verificacion-final, message=FALSE, warning=FALSE}
+# Crear malla completa de semanas epidemiológicas
+malla_completa <- expand.grid(
+  pais = unique(datos_master$pais),
+  anio_epi = 2014:2024,
+  semana_epi = 1:53
+)
+
+# Definir K_I al inicio del chunk
+K_I <- 8  # Semanas de inmunidad/vigilancia
+
+# Unir con datos reales
+datos_master_completo <- malla_completa %>%
+  left_join(datos_master, by = c("pais", "anio_epi", "semana_epi")) %>%
+  # Imputar semanas sin reporte
+  mutate(
+    I_t_ajustado = ifelse(is.na(I_t_ajustado), 0, I_t_ajustado),
+    casos_totales = ifelse(is.na(casos_totales), 0, casos_totales)
+  ) %>%
+  # Recalcular rezagos DESPUÉS de imputar
+  group_by(pais) %>%
+  arrange(anio_epi, semana_epi) %>%
+  mutate(
+    I_t_1 = lag(I_t_ajustado, 1),
+    acumulado_casos_KI = rollapply(I_t_ajustado, width = K_I, FUN = sum, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  # Eliminar primeras semanas sin rezago
+  filter(!is.na(I_t_1))
+
+print("=== ESTRUCTURA FINAL ===")
+glimpse(datos_master_completo)
+```
 
 ### pause
 
