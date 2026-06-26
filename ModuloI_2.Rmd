@@ -1,0 +1,44 @@
+---
+title: "Réplica Metodológica: Modelo ETSIR y Dinámica de Transmisión del Dengue"
+author: "Auditoría Bioestadística Senior"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# 🧠 Chain-of-Thought: Lógica Estadística del Preprocesamiento
+
+Antes de ejecutar el código, es vital entender la arquitectura de los datos para el modelo **ETSIR (Environmental Time-Series SIR)** y el método de estimación **MSA (Multiple-Step-Ahead)**:
+
+1. **Continuidad Temporal (MMWR):** El modelo MSA minimiza el error de predicción a $k$ pasos. Si hay "huecos" (NAs) o semanas faltantes en la serie, la función de verosimilitud se rompe. Por ende, creamos una malla temporal continua.
+2. **Imputación de Casos (Interpolación vs. Ceros):** Imputar `0` en semanas sin reporte asume que la transmisión se detuvo, lo cual es biológicamente falso y genera un sesgo de atenuación. Usamos interpolación lineal (`na.approx`) para preservar la tendencia latente.
+3. **Agregación Climática (El error de los promedios):** Calcular ventanas móviles diarias y luego promediarlas semanalmente destruye la varianza (suaviza artificialmente los picos de lluvia). La regla de oro es: **Agregación semanal primero $\rightarrow$ Ventanas móviles después**.
+4. **Estacionariedad y ACF:** El método MSA busca igualar la Función de Autocorrelación (ACF) del modelo con la de los datos reales. Por ello, el Análisis Exploratorio (EDA) final incluye correlogramas.
+
+---
+
+# 1. Configuración del Entorno y Librerías
+
+Cargamos las librerías necesarias, agrupadas por su función en el pipeline.
+
+```{r setup, message=FALSE, warning=FALSE}
+# --- Manipulación de Datos y Series de Tiempo ---
+library(tidyverse)   # dplyr, ggplot2, purrr, readr (Flujo de datos y gráficos)
+library(lubridate)   # Manejo robusto de fechas
+library(zoo)         # Ventanas móviles (rollapply) e interpolación (na.approx)
+library(MMWRweek)    # Estándar epidemiológico de semanas (CDC)
+
+# --- Extracción de Datos Climáticos ---
+library(nasapower)   # API de la NASA para datos meteorológicos
+
+# --- Validación y Reporte ---
+library(knitr)       # Tablas limpias en Rmd
+library(forecast)    # Para gráficos de Autocorrelación (ACF/PACF)
+
+# Configuración global para reproducibilidad
+set.seed(2026)
+options(dplyr.summarise.inform = FALSE)
