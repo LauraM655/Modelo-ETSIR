@@ -435,6 +435,7 @@ cat("Registros climáticos diarios:", nrow(clima_diario), "\n")
 de acumulación sobre las series semanales.
 
 **Chain-of-Thought:**
+
 1. **Agregación semanal:** Temperatura → promedio; Precipitación → suma.
    Esto respeta la física: la temperatura es intensiva, la lluvia es extensiva.
 2. **Ventanas móviles sobre semanales:** `temp_K2` = promedio de las últimas
@@ -443,6 +444,7 @@ de acumulación sobre las series semanales.
    virus en el mosquito, que depende de la temperatura acumulada.
 
 **Ventanas candidatas (en semanas):**
+
 - Temperatura: 2, 4, 8 semanas (≈ 14, 28, 56 días)
 - Precipitación: 2, 4, 8 semanas
 
@@ -495,11 +497,13 @@ cat("Registros climáticos semanales:", nrow(clima_semanal), "\n")
 `pais + anio_epi + semana_epi`.
 
 **Chain-of-Thought sobre el tipo de join:**
+
 - Usamos `left_join` desde los datos epidemiológicos para no perder semanas.
 - Las semanas sin datos climáticos (inicio del período, antes de que la ventana
   móvil tenga suficientes datos) quedarán con NA → se imputarán en el Bloque 7.
 
 **Integridad de fechas:**
+
 - Ambas tablas usan el sistema MMWR (año + semana), lo que garantiza
   alineación exacta sin depender de fechas calendario que pueden tener
   desfases de 1-2 días según la convención de inicio de semana.
@@ -536,6 +540,7 @@ colSums(is.na(datos_master)) %>%
 **Objetivo:** Imputar NAs climáticos sin destruir la estacionalidad.
 
 **Chain-of-Thought:**
+
 - **Artículo original:** "Replace missing with the mean value of the same year."
 - **Problema:** La media anual de temperatura en Colombia es ~25°C todo el año,
   pero enero puede ser 22°C y julio 28°C. Imputar con 25°C en enero introduce

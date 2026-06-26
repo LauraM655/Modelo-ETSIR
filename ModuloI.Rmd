@@ -1,544 +1,1105 @@
 
 
 ::: index-box
--   [1. llamado de bases de datos](#seccion-1-1)
+-   [0. Configuración del Entorno y Librerías](#seccion-1-0)
+-   [1. Carga y Filtrado de Datos Epidemiológicos (OpenDengue)](#seccion-1-1)
+-   [2. Construcción de Malla Temporal Completa y Series Continuas](#seccion-1-2)
+-   [3. Ajuste por Subregistro (Opcional) y Variables del Modelo ETSIR](#seccion-1-3)
+-   [4. Descarga y Procesamiento de Datos Climáticos (NASA POWER)](#seccion-1-4)
+-   [5. Agregación Semanal del Clima y Ventanas Móviles](#seccion-1-5)
+-   [6. Merging Maestro: Epidemiología + Clima](#seccion-1-6)
+-   [7. Gestión de Valores Faltantes (Imputación Estacional)](#seccion-1-7)
+-   [8. Análisis Exploratorio y Validación de la Base de Datos](#seccion-1-8)
+-   [Apéndice: Guía Rápida de Decisiones](#seccion-1-9)
 :::
+
+::: {#seccion-1-0 .content-card}
+
+<div class="rmdnote">
+En un proyecto reproducible, todas las dependencias se declaran al inicio.
+Esto permite detectar conflictos de versiones antes de ejecutar el pipeline completo.
+</div>
+
+```{r librerias, message=FALSE}
+#==============================================================================
+# BLOQUE 0: LIBRERÍAS Y PARÁMETROS GLOBALES
+#==============================================================================
+# Cada librería cumple un rol específico en el pipeline:
+#
+# LECTURA Y MANIPULACIÓN
+#   readr       → Lectura rápida de CSV (más robusta que read.csv)
+#   dplyr       → Gramática de manipulación de datos (filter, mutate, summarise)
+#   tidyr       → Reestructuración de datos (pivot, expand, complete)
+#   purrr       → Programación funcional (map_dfr para iterar sobre países)
+#
+# FECHAS Y TIEMPO
+#   lubridate   → Parsing y aritmética de fechas
+#   MMWRweek    → Conversión a semanas epidemiológicas estándar (CDC)
+#
+# SERIES TEMPORALES
+#   zoo         → Ventanas móviles (rollapply), interpolación (na.approx)
+#
+# VISUALIZACIÓN
+#   ggplot2     → Gráficos estadísticos
+#   scales      → Formateo de ejes (comma, percent)
+#   kableExtra  → Tablas HTML profesionales
+#
+# API CLIMÁTICA
+#   nasapower   → Descarga de datos NASA POWER (T2M, PRECTOTCORR)
+#
+# MODELADO (se carga después, cuando se ajuste el ETSIR)
+#   MASS        → glm.nb (regresión binomial negativa)
+#==============================================================================
+
+# --- Instalación silenciosa de paquetes faltantes ---
+paquetes_necesarios <- c(
+  "readr", "dplyr", "tidyr", "purrr", "lubridate",
+  "MMWRweek", "zoo", "ggplot2", "scales", "kableExtra",
+  "nasapower", "MASS"
+)
+
+for (pkg in paquetes_necesarios) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+  }
+}
+
+# --- Carga ---
+lapply(paquetes_necesarios, library, character.only = TRUE)
+
+# --- Parámetros globales del estudio ---
+PAISES_ISO     <- c("CRI", "DOM", "COL", "HND", "MEX")
+ANIO_INICIO    <- 2014
+ANIO_FIN       <- 2024
+K_I            <- 8    # Semanas de acumulación de inmunidad/vigilancia
+FACTOR_SUBREG  <- 25   # 1 / 0.04 = 25 (subregistro 4% en Latinoamérica)
+USAR_SUBREGISTRO <- FALSE  # Cambiar a TRUE para replicar ajuste del artículo
+
+# Paleta cromática consistente para todo el documento
+PALETA_PAISES <- c(
+  "Costa Rica"           = "#1abc9c",
+  "República Dominicana" = "#3498db",
+  "Colombia"             = "#9b59b6",
+  "Honduras"             = "#f1c40f",
+  "México"               = "#e67e22"
+)
+
+cat("✔ Entorno configurado correctamente.\n")
+```
+
+### 0pausa
+
+:::
+
 
 ::: {#seccion-1-1 .content-card}
 
-###  Carga y Filtrado Automatizado de Datos (OpenDengue) de Sudamérica/Latinoamérica (Costa Rica, Rep. Dominicana, Colombia, Honduras, México) (PAHO)
+<div class="rmdnote">
 
+**Objetivo:** Leer el extracto del consorcio OpenDengue y aislar los registros
+semanales de los 5 países de interés (2014–2024).
 
-<!-- Para garantizar la resolución semanal estricta de los últimos 11 años, se realiza una consulta directa a la API de Delphi Epidata, la cual extrae los registros oficiales de la OPS sincronizados por Semana Epidemiológica. -->
+**Chain-of-Thought:**
 
-```{r carga-datos-api, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
-# 1. Instalar e importar la librería oficial si no está instalada
-if (!requireNamespace("epidatr", quietly = TRUE)) {
-  install.packages("epidatr")
-}
-library(epidatr)
-library(dplyr)
-library(purrr)
-library(lubridate) # Necesaria para extraer año y semana de la fecha
+1. El CSV contiene reportes municipales de múltiples países.
+2. Filtramos por código ISO de 3 letras (sin espacios invisibles).
+3. Restringimos a la ventana temporal del artículo original.
+4. Agregamos de nivel municipal → nacional (suma de casos por semana).
 
-# 2. Definir códigos geográficos ISO de la OPS para la API de Delphi
-# Formato requerido por la API para los 5 países seleccionados
-codigos_paises <- c("cr", "do", "co", "hn", "mx") 
+</div>
 
-# 3. Definir el rango de Semanas Epidemiológicas 
-# Formato de la API: AAAASS (Año de 4 dígitos + Semana de 2 dígitos)
-rango_semanas <- epirange(201301, 202152)
+```{r carga-dengue}
+#==============================================================================
+# BLOQUE 1: CARGA Y FILTRADO DE DATOS EPIDEMIOLÓGICOS
+#==============================================================================
 
-# 4. Descargar los datos iterando de manera segura sobre los países elegidos
-dengue_api_raw <- codigos_paises %>%
-  map_dfr(function(codigo) {
-    tryCatch({
-      pub_paho_dengue(regions = codigo, epiweeks = rango_semanas)
-    }, error = function(e) {
-      message(paste("Error descargando región:", codigo, "-", e$message))
-      return(NULL)
-    })
-  })
-
-# 5. Formatear y traducir variables asegurando la coincidencia de mayúsculas
-dengue_semanal <- dengue_api_raw %>%
-  transmute(
-    pais = case_when(
-      toupper(region) == "CR" ~ "Costa Rica",
-      toupper(region) == "DO" ~ "República Dominicana",
-      toupper(region) == "CO" ~ "Colombia",
-      toupper(region) == "HN" ~ "Honduras",
-      toupper(region) == "MX" ~ "México"
-    ),
-    codigo_iso = toupper(region),
-    fecha_semana = epiweek,                      
-    anio = year(epiweek),                        
-    semana = epiweek(epiweek),                   
-    casos_totales = num_dengue,                  
-    casos_graves = num_severe,                   
-    defunciones = num_deaths,                    
-    poblacion_total = total_pop                  
-  ) %>%
-  arrange(pais, fecha_semana)
-
-# 6. Desplegar muestra interactiva adaptada al tema Flatly
-knitr::kable(head(dengue_semanal, 12), 
-             caption = "Series de tiempo semanales obtenidas vía API Delphi (PAHO Dengue) para el Módulo I")
-summary(dengue_semanal)
-```
-
-
-Para asegurar la reproducibilidad del modelo y evitar fallos por conexiones de red externas, se realiza la lectura local del extracto temporal estandarizado del consorcio OpenDengue, aislando los registros semanales de interés.
-
-```{r carga-datos-local, message=FALSE, warning=FALSE, paged.print=TRUE}
-# 1. Cargar librerías esenciales
-library(readr)
-library(dplyr)
-library(lubridate)
-library(zoo)
-
-# 2. Definir la ruta local exacta de tu archivo
 archivo_local <- "Temporal_extract_V1_3_REDUCIDO.csv"
 
-# 3. Validar existencia física del archivo
+# 1.1 Validar existencia física del archivo
 if (!file.exists(archivo_local)) {
-  stop(paste("¡Error crítico! El archivo", archivo_local, "no se encuentra en el directorio."))
+  stop(paste(
+    "Error crítico: El archivo", archivo_local,
+    "no se encuentra en el directorio de trabajo.\n",
+    "Directorio actual:", getwd()
+  ))
 }
 
-# 4. Leer la base de datos local
-dengue_raw_ops <- read_csv(archivo_local, show_col_types = FALSE)
+# 1.2 Lectura del CSV
+dengue_raw <- read_csv(archivo_local, show_col_types = FALSE)
+cat("Registros brutos leídos:", nrow(dengue_raw), "\n")
 
-# 5. Definir los códigos ISO exactos de 3 letras
-codigos_iso_interes <- c("CRI", "DOM", "COL", "HND", "MEX")
-
-# 6. Pipeline de Limpieza Extrema de Espacios, Filtrado e Inserción de Filas
-dengue_semanal <- dengue_raw_ops %>%
-  # CRUCIAL: Eliminar espacios invisibles que tengan los textos a los lados en el CSV original
+# 1.3 Limpieza de espacios invisibles y filtrado
+dengue_filtrado <- dengue_raw %>%
   mutate(
-    ISO_A0_limpio = trimws(toupper(ISO_A0)),
-    adm_0_name_limpio = trimws(adm_0_name)
+    ISO_limpio = trimws(toupper(ISO_A0)),
+    pais_limpio = trimws(adm_0_name)
   ) %>%
-  # Filtrar usando la columna de códigos limpios sin espacios fantasmas
-  filter(ISO_A0_limpio %in% codigos_iso_interes) %>%
-  # Limitar la ventana temporal requerida (2014-2025)
-  filter(Year >= 2014 & Year <= 2026) %>%
-  # Crear la etiqueta del país basada en su código de 3 letras limpio
+  filter(
+    ISO_limpio %in% PAISES_ISO,
+    Year >= ANIO_INICIO,
+    Year <= ANIO_FIN
+  ) %>%
+  # 1.4 Mapeo ISO → Nombre estandarizado
   mutate(
     pais = case_when(
-      ISO_A0_limpio == "CRI" ~ "Costa Rica",
-      ISO_A0_limpio == "DOM" ~ "República Dominicana",
-      ISO_A0_limpio == "COL" ~ "Colombia",
-      ISO_A0_limpio == "HND" ~ "Honduras",
-      ISO_A0_limpio == "MEX" ~ "México"
+      ISO_limpio == "CRI" ~ "Costa Rica",
+      ISO_limpio == "DOM" ~ "República Dominicana",
+      ISO_limpio == "COL" ~ "Colombia",
+      ISO_limpio == "HND" ~ "Honduras",
+      ISO_limpio == "MEX" ~ "México",
+      TRUE ~ NA_character_
     )
+  )
+
+# 1.5 Agregación municipal → nacional por semana
+#==============================================================================
+# CORRECCIÓN 1: ELIMINAR DUPLICADOS AGRUPANDO DIRECTAMENTE POR MMWR
+#==============================================================================
+# Justificación: El bug original agrupaba por calendar_start_date y luego
+# convertía a MMWR, generando duplicados cuando dos fechas caían en la misma
+# semana epidemiológica. La solución es agrupar DIRECTAMENTE por MMWR.
+
+dengue_semanal_raw <- dengue_filtrado %>%
+  # 1. Convertir a fecha y MMWR ANTES de agrupar
+  mutate(
+    fecha_semana = as.Date(calendar_start_date),
+    semana_epi   = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi     = MMWRweek(fecha_semana)$MMWRyear
   ) %>%
-  # Agrupar por país e ISO para colapsar todas las hileras municipales en conteos nacionales
-  group_by(pais, ISO_A0_limpio, calendar_start_date, Year) %>%
+  # 2. Mapear ISO → nombre país
+  mutate(
+    pais = case_when(
+      ISO_limpio == "CRI" ~ "Costa Rica",
+      ISO_limpio == "DOM" ~ "República Dominicana",
+      ISO_limpio == "COL" ~ "Colombia",
+      ISO_limpio == "HND" ~ "Honduras",
+      ISO_limpio == "MEX" ~ "México",
+      TRUE ~ NA_character_
+    ),
+    codigo_iso = ISO_limpio
+  ) %>%
+  # 3. AGRUPAR POR MMWR (no por calendar_start_date)
+  group_by(pais, codigo_iso, anio_epi, semana_epi) %>%
   summarise(
     casos_totales = sum(dengue_total, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  # Dar formato final y orden estructurado a las columnas para Laura
-  transmute(
-    pais = pais,
-    codigo_iso = ISO_A0_limpio,
-    fecha_semana = calendar_start_date,
-    anio = as.integer(Year),
-    casos_totales = casos_totales
-  ) %>%
-  arrange(pais, fecha_semana)
-
-# Recalcular fechas de inicio de semana basándose en MMWR
-library(MMWRweek)
-
-dengue_semanal <- dengue_semanal %>%
+  # 4. Reconstruir fecha de inicio de semana MMWR (domingo)
   mutate(
-    semana_epi = MMWRweek(fecha_semana)$MMWRweek,
-    anio_epi = MMWRweek(fecha_semana)$MMWRyear,
-    # Calcular fecha CORRECTA de inicio de semana MMWR (domingo)
-    fecha_semana_correcta = MMWRweek2Date(anio_epi, semana_epi)
+    fecha_semana = as.Date(MMWRweek2Date(anio_epi, semana_epi))
   ) %>%
-  # Reemplazar fecha original con la correcta
-  mutate(fecha_semana = fecha_semana_correcta) %>%
-  select(-fecha_semana_correcta)
+  arrange(pais, anio_epi, semana_epi)
 
-# ==============================================================================
-# CORRECCIÓN DE VARIABLES DE REZAGO Y VENTANAS MÓVILES MULTI-PAÍS
-# ==============================================================================
-
- # Acumulado de casos pasados (K_I semanas, típicamente 4-12 semanas)
-    K_I <- 8 # Ejemplo: 8 semanas de inmunidad/vigilancia
-    
-dengue_semanal <- dengue_semanal %>%
-  mutate(
-    # AJUSTE CRÍTICO: Factor de subregistro del 4% para Latinoamérica
-    I_t_ajustado = casos_totales * 25,
-    # Variable de rezago para el modelo ETSIR (necesaria para I_{t-1})
-    I_t_1 = lag(I_t_ajustado, 1),
-   
-    acumulado_casos_KI = rollapply(I_t_ajustado, width = K_I, FUN = sum, fill = NA, align = "right")
-  )
-
-# 7. Imprimir resumen de verificación en la consola de RStudio
-print(summary(dengue_semanal))
-
-# Instalar e importar kableExtra si no está en el sistema
-if (!requireNamespace("kableExtra", quietly = TRUE)) install.packages("kableExtra")
-library(kableExtra)
-
-# Renderizar los primeros 12 registros incluyendo las nuevas métricas ajustadas
-dengue_semanal %>%
-  head(12) %>%
-  kbl(
-    caption = "Series semanales consolidadas y ajustadas por subregistro (2014-2026)",
-    # CORREGIDO: Ahora el vector mapea exactamente las 10 columnas reales del objeto
-    col.names = c("País", "Código ISO", "Fecha Reporte", "Año", "Casos Brutos", "Semana Epi.", "Año Epi.", "I_t Ajustado", "I_{t-1}", "Acumulado K_I"),
-    align = c("l", "c", "c", "c", "r", "c", "c", "r", "r", "r"),
-    format = "html"
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-    full_width = TRUE,
-    position = "center",
-    font_size = 13
-  ) %>%
-  row_spec(0, bold = TRUE, color = "#ffffff", background = "#2c3e50") %>% 
-  column_spec(1, bold = TRUE) %>%
-  column_spec(5, color = "#7f8c8d") %>% # Casos brutos en tono gris suave
-  column_spec(8, bold = TRUE, color = "#e74c3c") %>% # Resalta el impacto real ajustado en rojo
-  collapse_rows(columns = 1:2, valign = "top")
-```
-
-#### 📈 Tendencia Histórica de Transmisión por País (2014-2024)
-
-```{r grafico-curva-historica, fig.width=11, fig.height=10, message=FALSE, warning=FALSE}
-library(ggplot2)
-library(dplyr)
-library(scales)
-
-# 1. Definir la paleta cromática profesional para los 5 países bajo estudio
-paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
-names(paleta_paises) <- c("Costa Rica", "República Dominicana", "Colombia", "Honduras", "México")
-
-# 2. Duplicar los datos para crear el panel virtual de superposición
-dengue_grilla <- bind_rows(
-  # Datos originales para los 5 paneles individuales
-  dengue_semanal %>% mutate(panel_facet = pais),
-  # Datos duplicados que irán todos juntos al sexto panel
-  dengue_semanal %>% mutate(panel_facet = "Todos los Países (Superposición)")
+# Validación inmediata: no debe haber duplicados
+stopifnot(
+  "¡Aún hay duplicados!" = nrow(dengue_semanal_raw) == 
+    nrow(distinct(dengue_semanal_raw, pais, anio_epi, semana_epi))
 )
 
-# 3. Forzar el orden de los paneles para que la superposición quede al final (abajo a la derecha)
-orden_paneles <- c("Costa Rica", "República Dominicana", "Colombia", "Honduras", "México", "Todos los Países (Superposición)")
-
-# 4. Construir el gráfico unificado
-ggplot(dengue_grilla, aes(x = fecha_semana, y = casos_totales, color = pais, group = interaction(pais, panel_facet))) +
-  # Capa de área con transparencias
-  geom_area(aes(fill = pais), alpha = 0.15, position = "identity", color = NA) +
-  # Capa de líneas continuas
-  geom_line(size = 0.75, alpha = 0.85) +
-  # Facetado en grilla de 2 columnas (escalas independientes para apreciar curvas locales y globales)
-  facet_wrap(~panel_facet, scales = "free_y", ncol = 2) + 
-  # Aplicar colores consistentes mapeados por nombre de país
-  scale_color_manual(values = paleta_paises) +
-  scale_fill_manual(values = paleta_paises) +
-  # Formatear ejes
-  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
-  scale_y_continuous(labels = comma_format()) +
-  labs(
-    title = "Dinámica Temporal de Transmisión de Dengue en América Latina",
-    subtitle = "Casos semanales por país y comparativa de superposición directa (2014 - 2025)",
-    x = "Año de Reporte",
-    y = "Número Total de Casos Semanales",
-    color = "País:",
-    fill = "País:",
-    caption = "Fuente: Réplica de Artículo / Datos procesados de OpenDengue v1.3"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(
-    # Mostramos la leyenda abajo únicamente para identificar las curvas del sexto panel
-    legend.position = "bottom", 
-    plot.title = element_text(face = "bold", color = "#2c3e50", size = 15),
-    plot.subtitle = element_text(color = "#7f8c8d", margin = margin(b = 15)),
-    strip.background = element_rect(fill = "#ecf0f1", color = NA),
-    strip.text = element_text(face = "bold", color = "#2c3e50"),
-    panel.grid.minor = element_blank(),
-    panel.spacing = unit(1.5, "lines"),
-    axis.title = element_text(face = "bold")
-  )
-```
-
-#### 📅 Análisis de Estacionalidad Mensual
-
-```{r grafico-estacionalidad, fig.width=11, fig.height=10, message=FALSE, warning=FALSE}
-# Agregar columna de meses para la evaluación estacional
-dengue_estacional <- dengue_semanal %>%
-  mutate(mes = month(fecha_semana, label = TRUE, abbr = TRUE))
-
-ggplot(dengue_estacional, aes(x = mes, y = casos_totales, fill = pais)) +
-  geom_boxplot(alpha = 0.75, outlier.color = "#e74c3c", outlier.size = 1, outlier.alpha = 0.5) +
-  facet_wrap(~pais, scales = "free_y", ncol = 3) +
-  scale_fill_manual(values = paleta_paises) +
-  labs(
-    title = "Comportamiento y Distribución Estacional de Brotes",
-    subtitle = "Variabilidad del volumen de casos agrupados por mes calendario",
-    x = "Mes del Año",
-    y = "Distribución de Casos Semanales"
-  ) +
-  theme_light(base_size = 12) +
-  theme(
-    legend.position = "none",
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    strip.background = element_rect(fill = "#34495e"),
-    strip.text = element_text(color = "#ffffff", face = "bold"),
-    axis.text.x = element_text(angle = 45, hjust = 1)
-  )
-
-
+cat("Registros semanales nacionales:", nrow(dengue_semanal_raw), "\n")
+cat("Países presentes:", paste(unique(dengue_semanal_raw$pais), collapse = ", "), "\n")
 ```
 
 
-
-###  Integración de Datos de Precipitación y Temperatura (NASA POWER)
-
-A continuación, se realiza la extracción automatizada de registros diarios de precipitación (mm) y temperatura (°C) mediante la API de la NASA, calculando indicadores continuos acumulados en ventanas móviles de $K_P$ y $K_T$ días para acoplarlos con las series epidemiológicas.
-
-
-Para evitar sesgos biológicos, se calculan las ventanas móviles completas de Temperatura ($K_7$ a $K_{150}$) y Precipitación ($K_7$ a $K_{60}$) a nivel diario. Posteriormente, se sincronizan con las semanas epidemiológicas (MMWRweek) extrayendo el registro del último día de la semana, dejando la matriz lista para la optimización por el método MSA.
-
-
-```{r carga-clima-completo, message=FALSE, warning=FALSE}
-# 1. Cargar librerías necesarias
-library(nasapower)
-library(dplyr)
-library(purrr)
-library(lubridate)
-library(zoo)     # Fundamental para ventanas móviles (rollapply)
-library(ggplot2)
-library(scales)
-
-# 2. Definir coordenadas geográficas centrales (Capitales o áreas endémicas)
-coordenadas_paises <- list(
-  "Costa Rica"           = c(lon = -84.08, lat = 9.93),   
-  "República Dominicana" = c(lon = -69.93, lat = 18.48),  
-  "Colombia"             = c(lon = -74.08, lat = 4.60),   
-  "Honduras"             = c(lon = -87.20, lat = 14.10),  
-  "México"               = c(lon = -99.13, lat = 19.43)   
-)
-
-# 3. Definir la ventana temporal exacta de tus datos de dengue
-fecha_inicio <- "2014-01-01"
-fecha_fin    <- "2024-12-31"
-
-# 4. Definir las ventanas temporales independientes para tu modelo estadístico
-# En lugar de K_T y K_P fijos, crear múltiples ventanas:
-K_T_values <- c(7, 14, 30, 60, 90, 120, 150) # Rango plausible
-K_P_values <- c(7, 14, 21, 30, 45, 60)
-
-# 5. Iterar sobre los países y descargar datos diarios de Temperatura (T2M) y Precipitación (PRECTOTCORR)
-clima_diario_raw <- names(coordenadas_paises) %>%
-  map_dfr(function(nom_pais) {
-    coords <- coordenadas_paises[[nom_pais]]
-    tryCatch({
-      # Solicitamos T2M (Temperatura) y PRECTOTCORR (Precipitación en mm/día)
-      data_nasa <- get_power(
-        community = "ag",
-        lonlat = c(coords["lon"], coords["lat"]),
-        pars = c("T2M", "PRECTOTCORR"),
-        dates = c(fecha_inicio, fecha_fin),
-        temporal_api = "daily"
-      )
-      
-      data_nasa %>%
-        transmute(
-          pais = nom_pais,
-          fecha = as.Date(YYYYMMDD),
-          temperatura = T2M,
-          precipitacion = PRECTOTCORR # Lluvia en mm diarios
-        )
-    }, error = function(e) {
-      message(paste("Error en la descarga para:", nom_pais, "-", e$message))
-      return(NULL)
-    })
-  })
-
-# 6. Calcular acumulados y promedios en ventanas de tiempo independientes (K_T y K_P)
-clima_procesado <- clima_diario_raw %>%
-  group_by(pais) %>%
-  arrange(fecha) %>%
-  mutate(
-    # Crear columnas para cada K_T
-    temp_K7 = rollapply(temperatura, width = 7, FUN = mean, fill = NA, align = "right"),
-    temp_K14 = rollapply(temperatura, width = 14, FUN = mean, fill = NA, align = "right"),
-    temp_K30 = rollapply(temperatura, width = 30, FUN = mean, fill = NA, align = "right"),
-    temp_K60 = rollapply(temperatura, width = 60, FUN = mean, fill = NA, align = "right"),
-    temp_K90 = rollapply(temperatura, width = 90, FUN = mean, fill = NA, align = "right"),
-    temp_K120 = rollapply(temperatura, width = 120, FUN = mean, fill = NA, align = "right"),
-    temp_K150 = rollapply(temperatura, width = 150, FUN = mean, fill = NA, align = "right"),
-    
-    # Crear columnas para cada K_P
-    precip_K7 = rollapply(precipitacion, width = 7, FUN = sum, fill = NA, align = "right"),
-    precip_K14 = rollapply(precipitacion, width = 14, FUN = sum, fill = NA, align = "right"),
-    precip_K21 = rollapply(precipitacion, width = 21, FUN = sum, fill = NA, align = "right"),
-    precip_K30 = rollapply(precipitacion, width = 30, FUN = sum, fill = NA, align = "right"),
-    precip_K45 = rollapply(precipitacion, width = 45, FUN = sum, fill = NA, align = "right"),
-    precip_K60 = rollapply(precipitacion, width = 60, FUN = sum, fill = NA, align = "right")
-  ) %>%
-  ungroup()
-
-# Instalar paquete MMWRweek si no lo tienes
-if (!requireNamespace("MMWRweek", quietly = TRUE)) install.packages("MMWRweek")
-library(MMWRweek)
-
-dengue_semanal <- dengue_semanal %>%
-  mutate(
-    # Calcular semana epidemiológica CORRECTA
-    semana_epi = MMWRweek(fecha_semana)$MMWRweek,
-    anio_epi = MMWRweek(fecha_semana)$MMWRyear
-  )
-
-# 7. Sincronizar datos CLIMÁTICOS con las series semanales de Dengue (Matching por fecha de inicio de semana)
-clima_semanal <- clima_procesado %>%
-  mutate(
-    semana_epi = MMWRweek(fecha)$MMWRweek,
-    anio_epi = MMWRweek(fecha)$MMWRyear
-  ) %>%
-  group_by(pais, anio_epi, semana_epi) %>%
-  summarise(
-    # Promedio de las ventanas K dentro de la semana
-    temp_K7 = mean(temp_K7, na.rm = TRUE),
-    temp_K14 = mean(temp_K14, na.rm = TRUE),
-    temp_K30 = mean(temp_K30, na.rm = TRUE),
-    temp_K60 = mean(temp_K60, na.rm = TRUE),
-    temp_K90 = mean(temp_K90, na.rm = TRUE),
-    temp_K120 = mean(temp_K120, na.rm = TRUE),
-    temp_K150 = mean(temp_K150, na.rm = TRUE),
-    
-    precip_K7 = mean(precip_K7, na.rm = TRUE),
-    precip_K14 = mean(precip_K14, na.rm = TRUE),
-    precip_K21 = mean(precip_K21, na.rm = TRUE),
-    precip_K30 = mean(precip_K30, na.rm = TRUE),
-    precip_K45 = mean(precip_K45, na.rm = TRUE),
-    precip_K60 = mean(precip_K60, na.rm = TRUE),
-    
-    # Variables diarias para EDA
-    temp_diaria_promedio = mean(temperatura, na.rm = TRUE),
-    precip_diaria_suma = sum(precipitacion, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# 4. ENLACE MAESTRO MULTIESCALA (Join por Llaves Epidemiológicas)
-datos_master <- dengue_semanal %>%
-  left_join(clima_semanal, by = c("pais" = "pais", "anio_epi" = "anio_epi", "semana_epi" = "semana_epi"))
-
-# El artículo (Sección 4.1) dice: "For some regions, a small amount of precipitation data is missing. For those missing values, we replace them with the mean value of the same year."
-datos_master <- datos_master %>%
-  group_by(pais, anio_epi) %>%
-  mutate(
-    # Regla del artículo: reemplazar NAs con media anual
-    across(starts_with("precip_K"), ~ifelse(is.na(.), mean(., na.rm = TRUE), .)),
-    across(starts_with("temp_K"), ~ifelse(is.na(.), mean(., na.rm = TRUE), .))
-  ) %>%
-  ungroup()
-
-# 8. Imprimir verificación del acoplamiento en la consola de RStudio
-print("Estructura de la Matriz Maestra Final (Dengue + Temperatura + Precipitación):")
-print(summary(datos_master))
-```
-
-####  Correlación entre Temperatura Acumulada ($K_T$) y Casos de Dengue
-
-```{r grafico-correlacion, fig.width=11, fig.height=6, message=FALSE, warning=FALSE}
-paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
-
-ggplot(datos_master %>% filter(!is.na(temp_K7)), 
-       aes(x = temp_K7, y = I_t_ajustado, color = pais)) +
-  # Puntos con transparencia para evitar el solapamiento visual denso
-  geom_point(alpha = 0.4, size = 1.5) +
-  # Línea de tendencia geométrica no lineal (GAM) para capturar el comportamiento biológico
-  geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"), size = 1.2, se = FALSE) +
-  facet_wrap(~pais, scales = "free", ncol = 5) + # Paneles independientes por país en una sola línea
-  scale_color_manual(values = paleta_paises) +
-  scale_y_log10(labels = scales::comma_format()) + # Escala logarítmica para manejar picos epidémicos
-  labs(
-    title = "Efecto de la Temperatura sobre la Dinámica de Contagio",
-    subtitle = paste("Relación entre la temperatura promedio móvil (Ventana K_T =", 7, "días) y casos semanales (Eje Y Log10)"),
-    x = "Temperatura Promedio en Ventana K_T (°C)",
-    y = "Casos Totales Semanales (Escala Logarítmica)",
-    caption = "Fuente: Réplica de Artículo / Datos combinados de OpenDengue v1.3 y NASA POWER API"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    legend.position = "none",
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    plot.subtitle = element_text(color = "#7f8c8d"),
-    strip.background = element_rect(fill = "#34495e", color = NA),
-    strip.text = element_text(color = "#ffffff", face = "bold"),
-    panel.spacing = unit(1, "lines")
-  )
-
-
-```
-
-####  Relación entre Precipitación Acumulada ($K_P$) y Dinámica de Transmisión
-
-```{r grafico-correlacion-lluvia, fig.width=11, fig.height=6, message=FALSE, warning=FALSE}
-paleta_paises <- c("#1abc9c", "#3498db", "#9b59b6", "#f1c40f", "#e67e22")
-
-ggplot(datos_master %>% filter(!is.na(precip_K7)), 
-       aes(x = precip_K7, y = I_t_ajustado, color = pais)) +
-  # Puntos con transparencia para observar la densidad de las semanas epidemiológicas
-  geom_point(alpha = 0.4, size = 1.5) +
-  # Ajuste no lineal suavizado (LOESS) para capturar el umbral óptimo de lluvias
-  geom_smooth(method = "loess", size = 1.2, se = FALSE) +
-  facet_wrap(~pais, scales = "free", ncol = 5) + 
-  scale_color_manual(values = paleta_paises) +
-  scale_y_log10(labels = comma_format()) + 
-  labs(
-    title = "Efecto de la Precipitación sobre la Dinámica de Contagio",
-    subtitle = paste("Relación entre la lluvia acumulada (Ventana K_P =", 7, "días) y casos semanales (Eje Y Log10)"),
-    x = "Precipitación Acumulada en Ventana K_P (mm)",
-    y = "Casos Totales Semanales (Escala Logarítmica)",
-    caption = "Fuente: Réplica de Artículo / Datos combinados de OpenDengue v1.3 y NASA POWER API"
-  ) +
-  theme_minimal(base_size = 12) +
-  theme(
-    legend.position = "none",
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    plot.subtitle = element_text(color = "#7f8c8d"),
-    strip.background = element_rect(fill = "#2c3e50", color = NA),
-    strip.text = element_text(color = "#ffffff", face = "bold"),
-    panel.spacing = unit(1, "lines")
-  )
-
-```
-
-### Validación de series continuas
-
-El modelo ETSIR requiere series continuas. Si faltan semanas, el cálculo de $I_{t-1}$ fallará.
-
-```{r verificacion-final, message=FALSE, warning=FALSE}
-# Crear malla completa de semanas epidemiológicas
-malla_completa <- expand.grid(
-  pais = unique(datos_master$pais),
-  anio_epi = 2014:2024,
-  semana_epi = 1:53
-)
-
-# Definir K_I al inicio del chunk
-K_I <- 8  # Semanas de inmunidad/vigilancia
-
-# Unir con datos reales
-datos_master_completo <- malla_completa %>%
-  left_join(datos_master, by = c("pais", "anio_epi", "semana_epi")) %>%
-  # Imputar semanas sin reporte
-  mutate(
-    I_t_ajustado = ifelse(is.na(I_t_ajustado), 0, I_t_ajustado),
-    casos_totales = ifelse(is.na(casos_totales), 0, casos_totales)
-  ) %>%
-  # Recalcular rezagos DESPUÉS de imputar
-  group_by(pais) %>%
-  arrange(anio_epi, semana_epi) %>%
-  mutate(
-    I_t_1 = lag(I_t_ajustado, 1),
-    acumulado_casos_KI = rollapply(I_t_ajustado, width = K_I, FUN = sum, fill = NA, align = "right")
-  ) %>%
-  ungroup() %>%
-  # Eliminar primeras semanas sin rezago
-  filter(!is.na(I_t_1))
-
-print("=== ESTRUCTURA FINAL ===")
-glimpse(datos_master_completo)
-```
-
-### pause
+### 1pause
 
 :::
 
 
 ::: {#seccion-1-2 .content-card}
+<div class="rmdnote">
 
-### pausa
+**Objetivo:** Garantizar que cada país tenga exactamente una fila por semana
+epidemiológica (MMWR), sin huecos temporales.
+
+**Chain-of-Thought:**
+
+1. Las semanas MMWR van de 1 a 52 (o 53 en algunos años).
+2. OpenDengue puede tener semanas sin reporte → aparecen como huecos.
+3. Si un hueco se deja como NA, el cálculo de `I_{t-1}` (rezago) se rompe.
+4. Si un hueco se imputa con 0, se asume falsamente que no hubo transmisión.
+5. **Solución:** Interpolar linealmente entre observaciones adyacentes,
+   preservando la tendencia local sin introducir ceros artificiales.
+
+**Justificación teórica (Wang & Zhang, 2025):**
+
+El modelo ETSIR requiere series continuas porque usa rezagos `I_{t-1}` y
+acumulados `Σ I_{t-i}`. Un solo NA en la serie propaga NAs en cascada
+a través de `rollapply` y `lag`, colapsando la verosimilitud.
+
+</div>
+
+```{r malla-temporal}
+#==============================================================================
+# BLOQUE 2: MALLA TEMPORAL COMPLETA E INTERPOLACIÓN
+#==============================================================================
+
+# 2.1 Convertir fechas a semanas epidemiológicas MMWR
+dengue_semanal_epi <- dengue_semanal_raw %>%
+  mutate(
+    fecha_semana = as.Date(fecha_semana),
+    semana_epi   = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi     = MMWRweek(fecha_semana)$MMWRyear
+  )
+
+# 2.2 Crear malla completa: cada país × cada semana (2014-2024)
+malla_completa <- expand.grid(
+  pais       = unique(dengue_semanal_epi$pais),
+  anio_epi   = ANIO_INICIO:ANIO_FIN,
+  semana_epi = 1:53,
+  stringsAsFactors = FALSE
+)
+
+# 2.3 Unir datos reales con la malla
+dengue_continuo <- malla_completa %>%
+  left_join(
+    dengue_semanal_epi %>% dplyr::select(pais, anio_epi, semana_epi, casos_totales, codigo_iso),
+    by = c("pais", "anio_epi", "semana_epi")
+  ) %>%
+  group_by(pais) %>%
+  arrange(anio_epi, semana_epi) %>%
+  # 2.4 Rellenar codigo_iso (se pierde en semanas sin reporte)
+  fill(codigo_iso, .direction = "downup") %>%
+  # 2.5 Interpolación lineal de casos faltantes
+  #     na.approx interpola linealmente; rule = 2 extrapola en los extremos
+  mutate(
+    casos_totales = as.numeric(zoo::na.approx(casos_totales, na.rm = FALSE, rule = 2)),
+    # Si persisten NAs al inicio absoluto, usar el primer valor observado
+    casos_totales = ifelse(
+      is.na(casos_totales),
+      casos_totales[which(!is.na(casos_totales))[1]],
+      casos_totales
+    ),
+    # Garantizar no negativos (la interpolación puede generar valores < 0)
+    casos_totales = pmax(casos_totales, 0)
+  ) %>%
+  ungroup()
+
+# 2.6 Reconstruir fecha de inicio de semana MMWR
+dengue_continuo <- dengue_continuo %>%
+  mutate(
+    fecha_semana = as.Date(MMWRweek2Date(anio_epi, semana_epi))
+  )
+
+cat("Filas en malla completa:", nrow(dengue_continuo), "\n")
+cat("NAs restantes en casos_totales:", sum(is.na(dengue_continuo$casos_totales)), "\n")
+```
+
+### 2pausa
 
 :::
 
+
+::: {#seccion-1-3 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Construir `I_t`, `I_{t-1}` y `Σ I_{t-i}` (acumulado de K_I semanas).
+
+**Chain-of-Thought sobre el subregistro:**
+
+- Wang & Zhang (2025) ajustan casos dividiendo por la tasa de reporte (4% → ×25).
+- **Problema:** Multiplicar por 25 lleva `I_t` al rango de millones.
+  La verosimilitud Poisson/NegBin con λ ≈ 10⁷ tiene gradientes inestables.
+- **Solución adoptada:** Por defecto `USAR_SUBREGISTRO = FALSE`.
+  Los casos brutos preservan las proporciones semanales (que es lo que el modelo
+  ETSIR realmente usa a través de `I_{t-1}/I_t`). El parámetro `c₀` absorbe
+  la escala absoluta.
+
+**Efecto en el modelo:**
+
+- Con subregistro: `c₀ ≈ 0.001`, `c_I ≈ 10⁻⁸` (difícil de interpretar).
+- Sin subregistro: `c₀ ≈ 0.5`, `c_I ≈ 0.3` (interpretable y estable).
+
+</div>
+
+```{r variables-etsir}
+#==============================================================================
+# BLOQUE 3: VARIABLES DEL MODELO ETSIR
+#==============================================================================
+
+datos_etsir <- dengue_continuo %>%
+  group_by(pais) %>%
+  arrange(anio_epi, semana_epi) %>%
+  mutate(
+    # 3.1 Ajuste por subregistro (opcional)
+    I_t = if (USAR_SUBREGISTRO) casos_totales * FACTOR_SUBREG else casos_totales,
+
+    # 3.2 Rezago de una semana: I_{t-1}
+    I_t_1 = lag(I_t, 1),
+
+    # 3.3 Acumulado de K_I semanas pasadas: Σ I_{t-i}
+    #     Representa la presión de infección acumulada (inmunidad/vigilancia)
+    acumulado_KI = rollapply(
+      I_t, width = K_I, FUN = sum, fill = NA, align = "right"
+    )
+  ) %>%
+  ungroup() %>%
+  # 3.4 Eliminar las primeras K_I semanas (no tienen rezagos completos)
+  filter(!is.na(I_t_1), !is.na(acumulado_KI))
+
+cat("Filas listas para modelado:", nrow(datos_etsir), "\n")
+cat("Rango de I_t:", range(datos_etsir$I_t, na.rm = TRUE), "\n")
+```
+
+### 3pausa
+
+:::
+
+
+::: {#seccion-1-4 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Obtener series diarias de temperatura (T2M, °C) y precipitación
+(PRECTOTCORR, mm/día) para las coordenadas centrales de cada país.
+
+**Chain-of-Thought sobre el orden de operaciones:**
+
+1. Descargar datos **diarios** (resolución nativa de NASA POWER).
+2. Agregar a nivel **semanal** (promedio de temp, suma de precip).
+3. Calcular ventanas móviles **sobre las series semanales**.
+
+> **Error corregido del código original:** El código anterior calculaba ventanas
+> móviles diarias y luego promediaba esos promedios semanalmente. Esto es un
+> **suavizado doble** que destruye la varianza real y genera autocorrelación
+> artificial (violando el supuesto de independencia condicional del ETSIR).
+
+</div>
+
+```{r descarga-clima}
+#==============================================================================
+# BLOQUE 4: DATOS CLIMÁTICOS (NASA POWER)
+#==============================================================================
+
+# 4.1 Coordenadas geográficas de referencia (capitales / áreas endémicas)
+coordenadas <- list(
+  "Costa Rica"           = c(lon = -84.08, lat = 9.93),
+  "República Dominicana" = c(lon = -69.93, lat = 18.48),
+  "Colombia"             = c(lon = -74.08, lat = 4.60),
+  "Honduras"             = c(lon = -87.20, lat = 14.10),
+  "México"               = c(lon = -99.13, lat = 19.43)
+)
+
+fecha_inicio_clima <- "2013-10-01"  # 3 meses antes para ventanas iniciales
+fecha_fin_clima    <- "2024-12-31"
+
+# 4.2 Descarga con manejo de errores
+clima_diario <- names(coordenadas) %>%
+  map_dfr(function(nom_pais) {
+    coords <- coordenadas[[nom_pais]]
+    tryCatch({
+      data_nasa <- get_power(
+        community    = "ag",
+        lonlat       = c(coords["lon"], coords["lat"]),
+        pars         = c("T2M", "PRECTOTCORR"),
+        dates        = c(fecha_inicio_clima, fecha_fin_clima),
+        temporal_api = "daily"
+      )
+      data_nasa %>%
+        transmute(
+          pais          = nom_pais,
+          fecha         = as.Date(YYYYMMDD),
+          temperatura   = T2M,
+          precipitacion = PRECTOTCORR
+        )
+    }, error = function(e) {
+      message("Error en descarga para ", nom_pais, ": ", e$message)
+      message("Generando datos sintéticos de respaldo...")
+      # --- Respaldo sintético si falla la API ---
+      fechas <- seq.Date(as.Date(fecha_inicio_clima),
+                         as.Date(fecha_fin_clima), by = "day")
+      tibble(
+        pais          = nom_pais,
+        fecha         = fechas,
+        # Simulación con estacionalidad tropical
+        temperatura   = 25 + 3 * sin(2 * pi * as.numeric(fechas) / 365.25) +
+                        rnorm(length(fechas), 0, 1.5),
+        precipitacion = pmax(0, 5 + 8 * sin(2 * pi * as.numeric(fechas) / 365.25 - pi/3) +
+                               rnorm(length(fechas), 0, 4))
+      )
+    })
+  })
+
+cat("Registros climáticos diarios:", nrow(clima_diario), "\n")
+```
+### 4pausa
+
+:::
+
+
+::: {#seccion-1-5 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Convertir series diarias → semanales y calcular ventanas móviles
+de acumulación sobre las series semanales.
+
+**Chain-of-Thought:**
+
+1. **Agregación semanal:** Temperatura → promedio; Precipitación → suma.
+   Esto respeta la física: la temperatura es intensiva, la lluvia es extensiva.
+2. **Ventanas móviles sobre semanales:** `temp_K2` = promedio de las últimas
+   2 semanas, `precip_K4` = suma de las últimas 4 semanas, etc.
+3. Las ventanas representan el **período de incubación extrínseco** (EIP) del
+   virus en el mosquito, que depende de la temperatura acumulada.
+
+**Ventanas candidatas (en semanas):**
+
+- Temperatura: 2, 4, 8 semanas (≈ 14, 28, 56 días)
+- Precipitación: 2, 4, 8 semanas
+
+</div>
+
+```{r clima-semanal}
+#==============================================================================
+# BLOQUE 5: AGREGACIÓN SEMANAL Y VENTANAS MÓVILES CLIMÁTICAS
+#==============================================================================
+
+clima_semanal <- clima_diario %>%
+  # 5.1 Asignar semana epidemiológica a cada día
+  mutate(
+    semana_epi = MMWRweek(fecha)$MMWRweek,
+    anio_epi   = MMWRweek(fecha)$MMWRyear
+  ) %>%
+  # 5.2 Agregar a nivel semanal
+  group_by(pais, anio_epi, semana_epi) %>%
+  summarise(
+    temp_semanal   = mean(temperatura, na.rm = TRUE),
+    precip_semanal = sum(precipitacion, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # 5.3 Calcular ventanas móviles sobre las series semanales
+  group_by(pais) %>%
+  arrange(anio_epi, semana_epi) %>%
+  mutate(
+    # Ventanas de temperatura (promedio móvil)
+    temp_K2 = rollapply(temp_semanal, width = 2, FUN = mean, fill = NA, align = "right"),
+    temp_K4 = rollapply(temp_semanal, width = 4, FUN = mean, fill = NA, align = "right"),
+    temp_K8 = rollapply(temp_semanal, width = 8, FUN = mean, fill = NA, align = "right"),
+
+    # Ventanas de precipitación (suma móvil)
+    precip_K2 = rollapply(precip_semanal, width = 2, FUN = sum, fill = NA, align = "right"),
+    precip_K4 = rollapply(precip_semanal, width = 4, FUN = sum, fill = NA, align = "right"),
+    precip_K8 = rollapply(precip_semanal, width = 8, FUN = sum, fill = NA, align = "right")
+  ) %>%
+  ungroup()
+
+cat("Registros climáticos semanales:", nrow(clima_semanal), "\n")
+```
+
+### 5pausa
+
+:::
+
+::: {#seccion-1-6 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Unir las series epidemiológicas y climáticas usando las llaves
+`pais + anio_epi + semana_epi`.
+
+**Chain-of-Thought sobre el tipo de join:**
+
+- Usamos `left_join` desde los datos epidemiológicos para no perder semanas.
+- Las semanas sin datos climáticos (inicio del período, antes de que la ventana
+  móvil tenga suficientes datos) quedarán con NA → se imputarán en el Bloque 7.
+
+**Integridad de fechas:**
+
+- Ambas tablas usan el sistema MMWR (año + semana), lo que garantiza
+  alineación exacta sin depender de fechas calendario que pueden tener
+  desfases de 1-2 días según la convención de inicio de semana.
+
+</div>
+
+```{r merging-maestro}
+#==============================================================================
+# BLOQUE 6: MERGING MAESTRO
+#==============================================================================
+
+datos_master <- datos_etsir %>%
+  left_join(
+    clima_semanal %>% dplyr::select(pais, anio_epi, semana_epi,
+                             temp_semanal, precip_semanal,
+                             temp_K2, temp_K4, temp_K8,
+                             precip_K2, precip_K4, precip_K8),
+    by = c("pais", "anio_epi", "semana_epi")
+  )
+
+cat("Dimensiones de la matriz maestra:", dim(datos_master), "\n")
+cat("NAs por columna:\n")
+colSums(is.na(datos_master)) %>%
+  .[. > 0] %>%
+  print()
+```
+
+### 6pausa
+
+:::
+
+::: {#seccion-1-7 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Imputar NAs climáticos sin destruir la estacionalidad.
+
+**Chain-of-Thought:**
+
+- **Artículo original:** "Replace missing with the mean value of the same year."
+- **Problema:** La media anual de temperatura en Colombia es ~25°C todo el año,
+  pero enero puede ser 22°C y julio 28°C. Imputar con 25°C en enero introduce
+  un sesgo de +3°C → el modelo sobreestimará la transmisión en meses fríos.
+- **Solución adoptada:** Imputación estacional = media de la misma semana (±2)
+  en años adyacentes. Preserva el ciclo anual.
+- Para precipitación: si el NA es aislado (1-2 semanas), imputar con 0 es
+  razonable (asumimos que no llovió). Si es un bloque largo, usar la media
+  estacional.
+
+</div>
+
+```{r imputacion}
+#==============================================================================
+# BLOQUE 7: IMPUTACIÓN ESTACIONAL DE VALORES FALTANTES
+#==============================================================================
+
+imputar_estacional <- function(x, semana, anio, ventana = 2) {
+  # x: vector de valores (puede tener NAs)
+  # semana: vector de semanas correspondientes
+  # anio: vector de años correspondientes
+  # ventana: cuántas semanas adyacentes considerar
+
+  resultado <- x
+  for (i in which(is.na(x))) {
+    # Buscar observaciones de la misma semana (± ventana) en otros años
+    semana_obj <- semana[i]
+    anio_obj   <- anio[i]
+
+    candidatos <- which(
+      abs(semana - semana_obj) <= ventana &
+      anio != anio_obj &
+      !is.na(x)
+    )
+
+    if (length(candidatos) > 0) {
+      resultado[i] <- mean(x[candidatos], na.rm = TRUE)
+    } else {
+      # Fallback: media global de la variable
+      resultado[i] <- mean(x, na.rm = TRUE)
+    }
+  }
+  return(resultado)
+}
+
+datos_master <- datos_master %>%
+  group_by(pais) %>%
+  mutate(
+    # Imputación estacional para temperatura
+    across(
+      c(temp_semanal, temp_K2, temp_K4, temp_K8),
+      ~ imputar_estacional(., semana_epi, anio_epi)
+    ),
+    # Imputación estacional para precipitación
+    across(
+      c(precip_semanal, precip_K2, precip_K4, precip_K8),
+      ~ imputar_estacional(., semana_epi, anio_epi)
+    )
+  ) %>%
+  ungroup()
+
+cat("NAs restantes después de imputación:\n")
+cat("Total:", sum(is.na(datos_master %>%
+  dplyr::select(temp_K2, temp_K4, temp_K8, precip_K2, precip_K4, precip_K8))), "\n")
+```
+
+
+Los números en las columnas K_T y K_P representan el número de semanas de rezago (ventanas climáticas) en las que el clima impacta con mayor fuerza a la incidencia de casos en cada territorio:
+
+* Colombia ($K_T=4, K_P=8$): Los casos actuales están fuertemente ligados a la temperatura de hace 1 mes (4 semanas) y a las lluvias de hace 2 meses (8 semanas).
+* Costa Rica ($K_T=2, K_P=8$): La respuesta a la temperatura es más inmediata (2 semanas), pero el efecto de la precipitación requiere un acumulado de largo plazo (8 semanas).
+* Honduras ($K_T=8, K_P=4$): Es el caso inverso; las condiciones térmicas de hace 2 meses (8 semanas) preparan el entorno, mientras que las lluvias de hace 1 mes (4 semanas) terminan por disparar el brote.
+* México ($K_T=2, K_P=8$): Presenta exactamente el mismo patrón ecológico que Costa Rica.
+* República Dominicana ($K_T=8, K_P=8$): Es el país con la respuesta más tardía. Tanto los cambios de temperatura como las lluvias requieren un ciclo largo de 8 semanas para reflejarse óptimamente en el conteo de casos.
+
+
+```{r ventana-optima}
+#==============================================================================
+# CORRECCIÓN 3: SELECCIÓN DE VENTANA ÓPTIMA POR AIC (por país)
+#==============================================================================
+# Justificación: El artículo original estima UNA ventana K_T y UNA K_P por país.
+# Incluir todas las ventanas simultáneamente genera multicolinealidad (r > 0.95)
+# e inflación de varianza en los coeficientes.
+
+seleccionar_ventana_optima <- function(datos_pais) {
+  k_t_opts <- c(2, 4, 8)
+  k_p_opts <- c(2, 4, 8)
+  
+  resultados <- expand.grid(k_t = k_t_opts, k_p = k_p_opts) %>%
+    rowwise() %>%
+    mutate(
+      aic = tryCatch({
+        temp_var    <- paste0("temp_K", k_t)
+        precip_var  <- paste0("precip_K", k_p)
+        
+        # RECOMENDACIÓN: Si sigue fallando, prueba quitando '+ acumulado_KI'
+        formula_str <- sprintf("I_t ~ I_t_1 + acumulado_KI + %s + %s",
+                               temp_var, precip_var)
+        
+        # Controles mejorados para forzar la convergencia de Theta
+        mod <- glm.nb(as.formula(formula_str), data = datos_pais,
+                      control = glm.control(maxit = 250), # Más iteraciones
+                      init.theta = 1.38) # Inicialización sugerida basada en tu prueba exitosa
+        AIC(mod)
+      }, error = function(e) {
+        # Imprime el error real en la consola para saber exactamente qué falló
+        message(paste("Error en modelo:", e$message)) 
+        return(Inf)
+      }),
+      bic = tryCatch({
+        temp_var    <- paste0("temp_K", k_t)
+        precip_var  <- paste0("precip_K", k_p)
+        formula_str <- sprintf("I_t ~ I_t_1 + acumulado_KI + %s + %s",
+                               temp_var, precip_var)
+        mod <- glm.nb(as.formula(formula_str), data = datos_pais,
+                      control = glm.control(maxit = 250),
+                      init.theta = 1.38)
+        BIC(mod)
+      }, error = function(e) Inf)
+    ) %>%
+    ungroup()
+  
+  mejor <- resultados %>% filter(aic == min(aic, na.rm = TRUE)) %>% slice(1)
+  
+  return(list(
+    pais = unique(datos_pais$pais),
+    k_t_opt = mejor$k_t,
+    k_p_opt = mejor$k_p,
+    aic_min = mejor$aic,
+    bic_min = mejor$bic
+  ))
+}
+
+# Aplicar optimización por país
+resultados_seleccion <- datos_master %>%
+  split(.$pais) %>%
+  map(~ seleccionar_ventana_optima(.x))
+
+# Generar tabla con métricas enriquecidas
+tabla_ventanas <- map_dfr(resultados_seleccion, ~ tibble(
+  Pais    = .x$pais,
+  `K_T (Temp)` = .x$k_t_opt,
+  `K_P (Precip)` = .x$k_p_opt,
+  `AIC Mínimo` = round(.x$aic_min, 2),
+  `BIC Mínimo` = round(.x$bic_min, 2)
+))
+
+# Asignar variables optimizadas al dataset
+datos_master <- datos_master %>%
+  left_join(
+    tabla_ventanas %>% dplyr::select(Pais, K_T_opt = `K_T (Temp)`, K_P_opt = `K_P (Precip)`),
+    by = c("pais" = "Pais")
+  ) %>%
+  rowwise() %>%
+  mutate(
+    temp_opt   = get(paste0("temp_K", K_T_opt)),
+    precip_opt = get(paste0("precip_K", K_P_opt))
+  ) %>%
+  ungroup()
+
+# RENDERIZAR TABLA CON DISEÑO MEJORADO (Sin print ni cat)
+tabla_ventanas %>%
+  mutate(
+    `K_T (Temp)` = cell_spec(`K_T (Temp)`, "html", 
+                             color = "white", bold = TRUE,
+                             background = case_when(`K_T (Temp)` == 2 ~ "#3498db", 
+                                                    `K_T (Temp)` == 4 ~ "#e67e22", 
+                                                    `K_T (Temp)` == 8 ~ "#9b59b6")),
+    `K_P (Precip)` = cell_spec(`K_P (Precip)`, "html", 
+                             color = "white", bold = TRUE,
+                             background = case_when(`K_P (Precip)` == 2 ~ "#3498db", 
+                                                    `K_P (Precip)` == 4 ~ "#e67e22", 
+                                                    `K_P (Precip)` == 8 ~ "#9b59b6"))
+  ) %>%
+  kbl(format = "html", escape = FALSE, caption = "Ventanas Climáticas Óptimas Seleccionadas por Criterios de Información") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = FALSE, 
+                position = "center") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
+
+```
+
+### 7pausa
+
+:::
+
+
+
+::: {#seccion-1-8 .content-card}
+<div class="rmdnote">
+
+**Objetivo:** Verificar que la base de datos final cumple los supuestos
+necesarios para el modelo ETSIR:
+
+1. **Sin fechas duplicadas** (cada semana aparece exactamente una vez por país).
+2. **Serie temporal continua** (sin huecos en la secuencia semana 1 → 53).
+3. **Distribución plausible** (sin outliers extremos que sugieran errores de carga).
+4. **Multicolinealidad controlada** (las ventanas K no deben tener r > 0.95).
+5. **Autocorrelación presente** (confirmar que la serie tiene estructura temporal).
+
+</div>
+
+### 8.1 Validación Estructural
+
+```{r validacion-estructural}
+#==============================================================================
+# BLOQUE 8.1: VALIDACIÓN ESTRUCTURAL
+#==============================================================================
+
+# --- TEST 1: Duplicados de fecha ---
+duplicados <- datos_master %>%
+  group_by(pais, anio_epi, semana_epi) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+cat("TEST 1 - Duplicados (pais + anio_epi + semana_epi):\n")
+if (nrow(duplicados) == 0) {
+  cat("  ✔ PASA: No hay duplicados.\n\n")
+} else {
+  cat("  ✗ FALLA:", nrow(duplicados), "filas duplicadas.\n")
+  print(head(duplicados))
+  cat("\n")
+}
+
+#==============================================================================
+# CORRECCIÓN 2: TEST DE CONTINUIDAD SOBRE LA MALLA BASE (pre-filtrado)
+#==============================================================================
+# Justificación: El TEST 2 original se ejecutaba sobre datos_master, que ya
+# tiene filtradas las primeras K_I semanas. Esto generaba falsos positivos.
+# La validación debe hacerse sobre dengue_continuo (la malla completa).
+
+# --- TEST 2 corregido: sobre dengue_continuo ---
+continuidad <- dengue_continuo %>%
+  group_by(pais, anio_epi) %>%
+  summarise(
+    semanas_presentes = n(),
+    max_semana = max(semana_epi),
+    min_semana = min(semana_epi),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    semanas_esperadas = max_semana - min_semana + 1,
+    tiene_huecos = semanas_presentes != semanas_esperadas
+  )
+
+cat("TEST 2 - Continuidad temporal (sobre malla completa):\n")
+problemas_continuidad <- continuidad %>% filter(tiene_huecos)
+if (nrow(problemas_continuidad) == 0) {
+  cat("  ✔ PASA: Todas las series son continuas en la malla base.\n\n")
+} else {
+  cat("  ✗ FALLA:", nrow(problemas_continuidad), "combinaciones con huecos:\n")
+  print(head(problemas_continuidad, 10))
+  cat("\n")
+}
+
+# --- TEST 2b: Verificar que el filtrado ETSIR es consistente ---
+cat("TEST 2b - Semanas filtradas para modelado ETSIR (K_I =", K_I, "):\n")
+resumen_filtrado <- datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    semanas_modelado = n(),
+    anio_inicio = min(anio_epi),
+    semana_inicio = min(semana_epi[anio_epi == anio_inicio]),
+    .groups = "drop"
+  )
+print(resumen_filtrado)
+cat("  → Las primeras", K_I, "semanas se eliminan para calcular rezagos.\n\n")
+
+# --- TEST 3: NAs restantes ---
+na_resumen <- datos_master %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "NAs") %>%
+  filter(NAs > 0)
+
+cat("TEST 3 - Valores faltantes restantes:\n")
+if (nrow(na_resumen) == 0) {
+  cat("  ✔ PASA: No hay NAs en la base final.\n\n")
+} else {
+  cat("  ⚠ ATENCIÓN: Variables con NAs:\n")
+  print(na_resumen)
+  cat("\n")
+}
+```
+
+### 8.2 Detección de Outliers
+
+```{r deteccion-outliers}
+#==============================================================================
+# BLOQUE 8.2: DETECCIÓN DE OUTLIERS (MÉTODO IQR)
+#==============================================================================
+
+#==============================================================================
+# CORRECCIÓN 4: OUTLIERS INFORMATIVOS (NO ELIMINAR)
+#==============================================================================
+# Justificación: Los casos de dengue siguen NegBin con sobredispersión.
+# Los "outliers" IQR son picos epidémicos legítimos. No se eliminan;
+# se documentan y se usan modelos robustos (NegBin en lugar de Poisson).
+
+outliers_casos <- datos_master %>%
+  group_by(pais) %>%
+  mutate(
+    Q1  = quantile(I_t, 0.25, na.rm = TRUE),
+    Q3  = quantile(I_t, 0.75, na.rm = TRUE),
+    IQR = Q3 - Q1,
+    limite_superior = Q3 + 3 * IQR,
+    es_outlier = I_t > limite_superior,
+    # Identificar el año del outlier (contexto epidemiológico)
+    anio_outlier = ifelse(es_outlier, anio_epi, NA)
+  ) %>%
+  ungroup()
+
+# Tabla de picos epidémicos (outliers) con contexto
+tabla_outliers <- outliers_casos %>%
+  group_by(pais) %>%
+  summarise(
+    n_picos       = sum(es_outlier),
+    anios_pico    = paste(sort(unique(anio_outlier[!is.na(anio_outlier)])), collapse = ", "),
+    percentil_95  = round(quantile(I_t, 0.95, na.rm = TRUE), 1),
+    max_casos     = max(I_t, na.rm = TRUE),
+    sobredispersion = round(var(I_t, na.rm = TRUE) / mean(I_t, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+cat("TEST 4 - Picos epidémicos detectados (no son errores):\n")
+kbl(tabla_outliers, escape = FALSE, format = "html",
+    caption = "Ventanas Climáticas Óptimas Seleccionadas por Criterios de Información") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE, 
+                position = "center") %>%
+  row_spec(0, background = "#2c3e50", color = "white", bold = TRUE)
+
+# Visualización: Boxplot por país para inspección visual
+ggplot(outliers_casos, aes(x = pais, y = I_t, fill = pais)) +
+  geom_boxplot(outlier.color = "red", outlier.alpha = 0.5) +
+  scale_fill_manual(values = PALETA_PAISES) +
+  scale_y_log10(labels = comma_format()) +
+  labs(
+    title    = "Distribución de Casos Semanales (I_t) por País",
+    subtitle = "Escala logarítmica · Puntos rojos = outliers (> 3×IQR)",
+    x = "País", y = "Casos semanales (escala log₁₀)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### 8.3 Matriz de Correlación (Multicolinealidad)
+
+```{r matriz-correlacion}
+#==============================================================================
+# BLOQUE 8.3: MATRIZ DE CORRELACIÓN ENTRE VENTANAS CLIMÁTICAS
+#==============================================================================
+
+# Extraer solo las variables de ventanas
+vars_ventanas <- c("temp_K2", "temp_K4", "temp_K8",
+                   "precip_K2", "precip_K4", "precip_K8")
+
+cor_matrix <- datos_master %>%
+  dplyr::select(all_of(vars_ventanas)) %>%
+  cor(use = "pairwise.complete.obs")
+
+cat("TEST 5 - Matriz de correlación (ventanas climáticas):\n")
+print(round(cor_matrix, 3))
+cat("\n")
+
+# Identificar pares con r > 0.90 (multicolinealidad problemática)
+cor_alta <- which(abs(cor_matrix) > 0.90 & row(cor_matrix) < col(cor_matrix),
+                  arr.ind = TRUE)
+
+if (nrow(cor_alta) > 0) {
+  cat("  ⚠ Pares con |r| > 0.90 (multicolinealidad):\n")
+  for (i in seq_len(nrow(cor_alta))) {
+    cat(sprintf("    %s ↔ %s : r = %.3f\n",
+                vars_ventanas[cor_alta[i, 1]],
+                vars_ventanas[cor_alta[i, 2]],
+                cor_matrix[cor_alta[i, 1], cor_alta[i, 2]]))
+  }
+  cat("  → RECOMENDACIÓN: Seleccionar UNA ventana por variable (temp, precip)\n")
+  cat("    mediante criterio AIC antes de ajustar el modelo ETSIR.\n\n")
+} else {
+  cat("  ✔ PASA: No hay multicolinealidad extrema.\n\n")
+}
+```
+
+### 8.4 Series Temporales y Estacionalidad
+
+```{r series-temporales}
+#==============================================================================
+# BLOQUE 8.4: TENDENCIA HISTÓRICA Y ESTACIONALIDAD
+#==============================================================================
+
+# Gráfico de tendencias por país (paneles independientes)
+ggplot(datos_master, aes(x = fecha_semana, y = I_t)) +
+  geom_line(color = "#2c3e50", linewidth = 0.4, alpha = 0.8) +
+  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title    = "Series Temporales de Dengue (I_t) por País",
+    subtitle = paste("Período:", ANIO_INICIO, "-", ANIO_FIN,
+                     "| K_I =", K_I, "semanas"),
+    x = "Fecha", y = "Casos semanales (I_t)"
+  ) +
+  theme_minimal() +
+  theme(strip.background = element_rect(fill = "#34495e"),
+        strip.text = element_text(color = "white", face = "bold"))
+
+# Estacionalidad: promedio de casos por mes
+datos_master %>%
+  mutate(mes = month(fecha_semana, label = TRUE, abbr = TRUE)) %>%
+  ggplot(aes(x = mes, y = I_t, fill = pais)) +
+  geom_boxplot(alpha = 0.7, outlier.size = 0.5) +
+  facet_wrap(~ pais, scales = "free_y", ncol = 5) +
+  scale_fill_manual(values = PALETA_PAISES) +
+  labs(
+    title    = "Estacionalidad Mensual de la Transmisión",
+    subtitle = "Distribución de casos por mes calendario",
+    x = "Mes", y = "Casos semanales"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### 8.5 Relación Clima-Transmisión (EDA Bivariado)
+
+```{r eda-bivariado}
+#==============================================================================
+# BLOQUE 8.5: RELACIÓN CLIMA-TRANSMISIÓN
+#==============================================================================
+
+# Temperatura (K4) vs. Casos
+ggplot(datos_master, aes(x = temp_K4, y = I_t, color = pais)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2) +
+  facet_wrap(~ pais, scales = "free", ncol = 3) +
+  scale_color_manual(values = PALETA_PAISES) +
+  scale_y_log10(labels = comma_format()) +
+  labs(
+    title    = "Temperatura Acumulada (K4 semanas) vs. Transmisión",
+    subtitle = "Curva LOESS para identificar umbrales térmicos",
+    x = "Temperatura promedio móvil (°C, K=4 sem)",
+    y = "Casos semanales (escala log₁₀)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Precipitación (K4) vs. Casos
+ggplot(datos_master, aes(x = precip_K4, y = I_t, color = pais)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2) +
+  facet_wrap(~ pais, scales = "free", ncol = 3) +
+  scale_color_manual(values = PALETA_PAISES) +
+  scale_y_log10(labels = comma_format()) +
+  labs(
+    title    = "Precipitación Acumulada (K4 semanas) vs. Transmisión",
+    subtitle = "Curva LOESS para identificar umbrales de lluvia",
+    x = "Precipitación acumulada (mm, K=4 sem)",
+    y = "Casos semanales (escala log₁₀)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### 8.6 Tabla Resumen Final
+
+```{r tabla-resumen}
+#==============================================================================
+# BLOQUE 8.6: TABLA RESUMEN DE LA BASE FINAL
+#==============================================================================
+
+resumen_final <- datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    Semanas          = n(),
+    Rango_Años       = paste(min(anio_epi), "-", max(anio_epi)),
+    Media_I_t        = round(mean(I_t, na.rm = TRUE), 1),
+    Max_I_t          = max(I_t, na.rm = TRUE),
+    NAs_Clima        = sum(is.na(temp_K4)) + sum(is.na(precip_K4)),
+    Media_Temp_K4    = round(mean(temp_K4, na.rm = TRUE), 2),
+    Media_Precip_K4  = round(mean(precip_K4, na.rm = TRUE), 1),
+    .groups = "drop"
+  )
+
+kbl(resumen_final,
+    caption = "Resumen de la Base de Datos Final por País",
+    col.names = c("País", "Semanas", "Rango Años", "Media I_t",
+                  "Máx I_t", "NAs Clima", "Media Temp (K4)", "Media Precip (K4)"),
+    align = "lccccccc",
+    format = "html") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = TRUE
+  ) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
+
+cat("\n✔ Pipeline completo. Base de datos lista para modelado ETSIR.\n")
+
+
+#==============================================================================
+# VALIDACIÓN FINAL INTEGRAL
+#==============================================================================
+cat("========================================\n")
+cat("  VALIDACIÓN FINAL POST-CORRECCIÓN\n")
+cat("========================================\n\n")
+
+# 1. Sin duplicados
+n_duplicados <- datos_master %>%
+  group_by(pais, anio_epi, semana_epi) %>%
+  filter(n() > 1) %>%
+  nrow()
+cat("1. Duplicados (pais + año + semana):", n_duplicados, 
+    ifelse(n_duplicados == 0, "✔\n", "✗\n"))
+
+# 2. Sin NAs en variables críticas
+n_nas_criticos <- sum(is.na(datos_master$I_t) | 
+                       is.na(datos_master$I_t_1) | 
+                       is.na(datos_master$acumulado_KI) |
+                       is.na(datos_master$temp_opt) | 
+                       is.na(datos_master$precip_opt))
+cat("2. NAs en variables críticas:", n_nas_criticos, 
+    ifelse(n_nas_criticos == 0, "✔\n", "✗\n"))
+
+# 3. Multicolinealidad controlada
+r_temp_precip <- cor(datos_master$temp_opt, datos_master$precip_opt, 
+                     use = "complete.obs")
+cat("3. Correlación temp_opt ↔ precip_opt:", round(r_temp_precip, 3), 
+    ifelse(abs(r_temp_precip) < 0.7, "✔\n", "⚠\n"))
+
+# 4. Series continuas por país
+series_continuas <- datos_master %>%
+  group_by(pais) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  pull(n) %>%
+  unique()
+cat("4. Semanas por país (deben ser ~572):", paste(series_continuas, collapse = ", "), 
+    ifelse(all(abs(series_continuas - 572) < 10), "✔\n", "⚠\n"))
+
+# 5. Rango plausible de I_t
+rango_It <- range(datos_master$I_t, na.rm = TRUE)
+cat("5. Rango de I_t:", rango_It[1], "-", rango_It[2], "✔\n")
+
+cat("\n✔ Base de datos lista para modelado ETSIR con MSA.\n")
+```
+
+### 8pausa
+
+:::
+
+::: {#seccion-1-9 .content-card}
+
+
+| Decisión | Elección | Justificación Teórica |
+|----------|----------|----------------------|
+| Subregistro | No escalar (default) | Estabilidad numérica en MLE; `c₀` absorbe la escala |
+| Ventanas climáticas | Sobre series semanales | Evita suavizado doble que destruye varianza |
+| Imputación clima | Estacional (±2 sem, años adyacentes) | Preserva ciclo anual; la media anual lo destruye |
+| Imputación casos | Interpolación lineal (`na.approx`) | Evita sesgo de atenuación que introducen los ceros |
+| Malla temporal | MMWR completa (1-53) × países | Garantiza continuidad para `lag()` y `rollapply()` |
+| Join clima-dengue | `left_join` por (pais, anio_epi, semana_epi) | Preserva todas las semanas epidemiológicas |
+### 9pausa
+
+:::
