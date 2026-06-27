@@ -251,7 +251,8 @@ dengue_continuo <- malla_completa %>%
       casos_totales
     ),
     # Garantizar no negativos (la interpolación puede generar valores < 0)
-    casos_totales = pmax(casos_totales, 0)
+    casos_totales = pmax(casos_totales, 0),
+    casos_totales = as.integer(round(casos_totales))
   ) %>%
   ungroup()
 

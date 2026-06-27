@@ -1,7 +1,7 @@
 
 ::: index-box
 -   [0. Revisión teórica](#seccion-2-0)
--   [1. Carga y Filtrado de Datos Epidemiológicos (OpenDengue)](#seccion-2-1)
+-   [1. Predicción ETSIR one step ahead](#seccion-2-1)
 -   [2. Construcción de Malla Temporal Completa y Series Continuas](#seccion-2-2)
 -   [3. Ajuste por Subregistro (Opcional) y Variables del Modelo ETSIR](#seccion-2-3)
 -   [4. Descarga y Procesamiento de Datos Climáticos (NASA POWER)](#seccion-2-4)
@@ -12,7 +12,7 @@
 -   [Apéndice: Guía Rápida de Decisiones](#seccion-2-9)
 :::
 
-::: {#seccion-1-0 .content-card}
+::: {#seccion-2-0 .content-card}
 
 ### Planteamiento Teórico del Modelo ETSIR
 
@@ -187,3 +187,569 @@ Para cada país p ∈ {Colombia, Costa Rica, Honduras, México, R. Dominicana}:
   
   7. Bootstrap (B=500) para p-valores de cada coeficiente
 ```
+
+### 0pausa
+
+:::
+
+::: {#seccion-2-1 .content-card}
+
+```{r estimacion OSA}
+#==============================================================================
+# BLOQUE 1: FUNCIÓN DE PREDICCIÓN ETSIR ONE-STEP-AHEAD
+#==============================================================================
+# Justificación teórica:
+# Implementa la ecuación (1) de Wang & Zhang (2025) con funciones piecewise
+# lineales para capturar efectos de umbral en temperatura y precipitación.
+#
+# Diferencias con el código base:
+#   - Unifica etsir_pred() y etsir_step() en una sola función
+#   - Usa los nombres de variables de tu base (acumulado_KI, temp_opt, etc.)
+#   - Acepta data.frames completos o vectores (flexible para MLE y MSA)
+#==============================================================================
+
+etsir_pred <- function(I_t_1, acumulado_KI, temperatura, precipitacion,
+                       c0, cI, cP, cP2, HP, cT, cT2, HT) {
+  
+  # ---------------------------------------------------------
+  # Función piecewise para temperatura: g_T(v)
+  #   - cT  > 0: efecto positivo inicial (más calor → más mosquitos)
+  #   - cT2 < 0: efecto negativo tras el umbral H_T
+  # ---------------------------------------------------------
+  gT <- cT * temperatura + cT2 * pmax(temperatura - HT, 0)
+  
+  # ---------------------------------------------------------
+  # Función piecewise para precipitación: g_P(v)
+  #   - cP  > 0: efecto positivo inicial (más lluvia → más criaderos)
+  #   - cP2 < 0: efecto de lavado tras el umbral H_P
+  # ---------------------------------------------------------
+  gP <- cP * precipitacion + cP2 * pmax(precipitacion - HP, 0)
+  
+  # ---------------------------------------------------------
+  # Ecuación ETSIR completa (Wang & Zhang, 2025, ec. 1)
+  # E(I_t | F_{t-1}) = {c0 + cI*ΣI_{t-i} + g_T + g_P} * I_{t-1}
+  # ---------------------------------------------------------
+  mu <- (c0 + cI * acumulado_KI + gT + gP) * I_t_1
+  
+  # Restricción biológica: la esperanza no puede ser negativa
+  mu <- pmax(mu, 1e-6)
+  
+  return(mu)
+}
+
+cat("✔ Función etsir_pred() definida correctamente.\n")
+```
+
+```{r funcion ver-neg}
+#==============================================================================
+# BLOQUE 2: FUNCIÓN DE VEROSIMILITUD NEGATIVA (NegBin)
+#==============================================================================
+# Justificación teórica:
+# El artículo asume I_t ~ NegBin(μ_t, θ) por la sobredispersión observada
+# (varianza >> media). La función devuelve la verosimilitud NEGATIVA para
+# poder usar optimizadores que minimizan (optim, nlminb).
+#
+# Parámetros a estimar:
+#   β = (c0, cI, cP, cP2, cT, cT2, log(θ))
+#   Nota: θ se parametriza en log para garantizar positividad
+#
+# Umbrales H_T, H_P se estiman por grid search externo (no por gradiente,
+# porque la función no es diferenciable en los umbrales).
+#==============================================================================
+
+etsir_nll <- function(params, datos) {
+  # params = c(c0, cI, cP, cP2, cT, cT2, HT, HP, log_theta)
+  c0      <- params[1]
+  cI      <- params[2]
+  cP      <- params[3]
+  cP2     <- params[4]
+  cT      <- params[5]
+  cT2     <- params[6]
+  HT      <- params[7]
+  HP      <- params[8]
+  log_theta <- params[9]
+  theta   <- exp(log_theta)
+  
+  # Calcular esperanza condicional
+  mu <- etsir_pred(
+    I_t_1        = datos$I_t_1,
+    acumulado_KI = datos$acumulado_KI,
+    temperatura  = datos$temp_opt,
+    precipitacion = datos$precip_opt,
+    c0 = c0, cI = cI, cP = cP, cP2 = cP2, HP = HP,
+    cT = cT, cT2 = cT2, HT = HT
+  )
+  
+  # Verosimilitud NegBin (log-verosimilitud negativa)
+  # dnbinom(x, mu, size) con size = theta
+  nll <- -sum(dnbinom(datos$I_t, mu = mu, size = theta, log = TRUE))
+  
+  # Penalización si hay valores no finitos (evita que el optimizador explote)
+  if (!is.finite(nll)) nll <- 1e10
+  
+  return(nll)
+}
+
+cat("✔ Función etsir_nll() definida correctamente.\n")
+```
+
+```{r modelo OSA por pais}
+#==============================================================================
+# BLOQUE 12 CORREGIDO: AJUSTE DEL MODELO ETSIR ONE-STEP-AHEAD POR PAÍS
+#==============================================================================
+# Mejoras implementadas:
+#   1. Validación exhaustiva de datos antes de ajustar
+#   2. Mensajes informativos de diagnóstico
+#   3. Extracción robusta de coeficientes
+#   4. Fallback a Poisson si NegBin no converge
+#   5. Grid de umbrales más amplio
+#   6. Inicialización adaptativa de theta
+
+library(MASS)
+
+ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
+  
+  if (is.null(pais_nombre)) pais_nombre <- unique(datos_pais$pais)[1]
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("  Ajustando ETSIR One-Step-Ahead para:", pais_nombre, "\n")
+  cat("═══════════════════════════════════════════════════════\n")
+  
+  # ---------------------------------------------------------
+  # PASO 0: Validación exhaustiva de datos
+  # ---------------------------------------------------------
+  cat("  [0/5] Validando datos de entrada...\n")
+  
+  # Verificar que todas las variables necesarias existen
+  vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
+  vars_faltantes <- setdiff(vars_requeridas, colnames(datos_pais))
+  
+  if (length(vars_faltantes) > 0) {
+    stop("Variables faltantes en datos de ", pais_nombre, ": ", 
+         paste(vars_faltantes, collapse = ", "))
+  }
+  
+  # Filtrar NAs en variables críticas
+  datos_clean <- datos_pais %>%
+    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+           !is.na(temp_opt), !is.na(precip_opt))
+  
+  n_original <- nrow(datos_pais)
+  n_clean <- nrow(datos_clean)
+  
+  if (n_clean == 0) {
+    stop("No hay datos válidos después de filtrar NAs para ", pais_nombre)
+  }
+  
+  if (n_clean < n_original) {
+    cat("    ⚠ Se eliminaron", n_original - n_clean, "filas con NAs\n")
+  }
+  
+  # Verificar que I_t tenga variación
+  if (sd(datos_clean$I_t, na.rm = TRUE) == 0) {
+    stop("I_t no tiene variación en ", pais_nombre, " (todos los valores son iguales)")
+  }
+  
+  cat("    ✔ Datos validados:", n_clean, "observaciones\n")
+  
+  # ---------------------------------------------------------
+  # PASO 1: Grid de umbrales (H_T, H_P)
+  # ---------------------------------------------------------
+  cat("  [1/5] Construyendo grid de umbrales...\n")
+  
+  # Grid más amplio basado en percentiles
+  HT_candidatos <- quantile(datos_clean$temp_opt, 
+                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
+                            na.rm = TRUE)
+  HP_candidatos <- quantile(datos_clean$precip_opt, 
+                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
+                            na.rm = TRUE)
+  
+  grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
+  cat("    Grid:", nrow(grid_umbrales), "combinaciones\n")
+  
+  resultados_grid <- data.frame(
+    HT = numeric(), HP = numeric(), 
+    AIC = numeric(), logLik = numeric(),
+    c0 = numeric(), cI = numeric(),
+    cP = numeric(), cP2 = numeric(),
+    cT = numeric(), cT2 = numeric(),
+    theta = numeric(),
+    convergio = logical()
+  )
+  
+  # ---------------------------------------------------------
+  # PASO 2: Para cada (H_T, H_P), ajustar glm.nb
+  # ---------------------------------------------------------
+  cat("  [2/5] Ajustando modelos en grid...\n")
+  
+  n_convergio <- 0
+  
+  for (i in seq_len(nrow(grid_umbrales))) {
+    HT_cand <- grid_umbrales$HT[i]
+    HP_cand <- grid_umbrales$HP[i]
+    
+    # Construir variables piecewise para este par de umbrales
+    datos_tmp <- datos_clean %>%
+      mutate(
+        temp_tramo1  = temp_opt,
+        temp_tramo2  = pmax(temp_opt - HT_cand, 0),
+        precip_tramo1 = precip_opt,
+        precip_tramo2 = pmax(precip_opt - HP_cand, 0)
+      )
+    
+    # Intentar ajustar NegBin
+    mod <- tryCatch({
+      # Primer intento con init.theta = 1.5
+      MASS::glm.nb(
+        I_t ~ I_t_1 + acumulado_KI + 
+              temp_tramo1 + temp_tramo2 + 
+              precip_tramo1 + precip_tramo2,
+        data = datos_tmp,
+        control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+        init.theta = 1.5,
+        link = "log"
+      )
+    }, error = function(e) {
+      # Si falla, intentar sin init.theta
+      tryCatch({
+        MASS::glm.nb(
+          I_t ~ I_t_1 + acumulado_KI + 
+                temp_tramo1 + temp_tramo2 + 
+                precip_tramo1 + precip_tramo2,
+          data = datos_tmp,
+          control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+          link = "log"
+        )
+      }, error = function(e2) {
+        # Si NegBin falla completamente, intentar Poisson
+        tryCatch({
+          glm(
+            I_t ~ I_t_1 + acumulado_KI + 
+                temp_tramo1 + temp_tramo2 + 
+                precip_tramo1 + precip_tramo2,
+            data = datos_tmp,
+            family = poisson(link = "log"),
+            control = glm.control(maxit = 500)
+          )
+        }, error = function(e3) NULL)
+      })
+    })
+    
+    # Extraer resultados si el modelo convergió
+    if (!is.null(mod) && !inherits(mod, "try-error")) {
+      # Verificar que el modelo tenga coeficientes válidos
+      coefs <- coef(mod)
+      
+      if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
+        # Extraer coeficientes de forma robusta
+        c0_val <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
+        cI_val <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
+        cP_val <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
+        cP2_val <- if ("precip_tramo2" %in% names(coefs)) coefs["precip_tramo2"] else NA
+        cT_val <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
+        cT2_val <- if ("temp_tramo2" %in% names(coefs)) coefs["temp_tramo2"] else NA
+        
+        # Theta solo para NegBin
+        theta_val <- if (inherits(mod, "negbin")) mod$theta else NA
+        
+        resultados_grid <- rbind(resultados_grid, data.frame(
+          HT = HT_cand, HP = HP_cand,
+          AIC = AIC(mod),
+          logLik = as.numeric(logLik(mod)),
+          c0 = c0_val, cI = cI_val,
+          cP = cP_val, cP2 = cP2_val,
+          cT = cT_val, cT2 = cT2_val,
+          theta = theta_val,
+          convergio = TRUE
+        ))
+        
+        n_convergio <- n_convergio + 1
+      }
+    }
+  }
+  
+  cat("    ✔ Modelos convergidos:", n_convergio, "/", nrow(grid_umbrales), "\n")
+  
+  if (nrow(resultados_grid) == 0) {
+    warning("Ningún modelo convergió para ", pais_nombre, 
+            ". Verifique que las variables tengan variación y no estén perfectamente colineales.")
+    return(NULL)
+  }
+  
+  # ---------------------------------------------------------
+  # PASO 3: Seleccionar mejor combinación por AIC
+  # ---------------------------------------------------------
+  cat("  [3/5] Seleccionando mejor modelo por AIC...\n")
+  
+  mejor_idx <- which.min(resultados_grid$AIC)
+  mejor <- resultados_grid[mejor_idx, ]
+  
+  cat("    ✔ Mejor modelo:\n")
+  cat("      H_T =", round(mejor$HT, 2), "°C | H_P =", round(mejor$HP, 2), "mm\n")
+  cat("      AIC =", round(mejor$AIC, 2), "\n")
+  if (!is.na(mejor$theta)) {
+    cat("      θ (dispersión) =", round(mejor$theta, 3), "\n")
+  }
+  
+  # ---------------------------------------------------------
+  # PASO 4: Reconstruir el modelo final con los mejores umbrales
+  # ---------------------------------------------------------
+  cat("  [4/5] Reconstruyendo modelo final...\n")
+  
+  datos_finales <- datos_clean %>%
+    mutate(
+      temp_tramo1   = temp_opt,
+      temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+      precip_tramo1 = precip_opt,
+      precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+    )
+  
+  # Ajustar modelo final
+  modelo_final <- tryCatch({
+    if (!is.na(mejor$theta)) {
+      MASS::glm.nb(
+        I_t ~ I_t_1 + acumulado_KI + 
+              temp_tramo1 + temp_tramo2 + 
+              precip_tramo1 + precip_tramo2,
+        data = datos_finales,
+        control = glm.control(maxit = 1000),
+        init.theta = mejor$theta
+      )
+    } else {
+      glm(
+        I_t ~ I_t_1 + acumulado_KI + 
+              temp_tramo1 + temp_tramo2 + 
+              precip_tramo1 + precip_tramo2,
+        data = datos_finales,
+        family = poisson(link = "log"),
+        control = glm.control(maxit = 1000)
+      )
+    }
+  }, error = function(e) {
+    warning("No se pudo reconstruir el modelo final para ", pais_nombre)
+    NULL
+  })
+  
+  if (is.null(modelo_final)) {
+    return(NULL)
+  }
+  
+  # ---------------------------------------------------------
+  # PASO 5: Predicciones y residuos
+  # ---------------------------------------------------------
+  cat("  [5/5] Calculando predicciones y métricas...\n")
+  
+  datos_finales$mu_osa <- predict(modelo_final, type = "response")
+  datos_finales$residuo_osa <- datos_finales$I_t - datos_finales$mu_osa
+  
+  # Métricas de evaluación
+  ss_res <- sum(datos_finales$residuo_osa^2, na.rm = TRUE)
+  ss_tot <- sum((datos_finales$I_t - mean(datos_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+  R2 <- 1 - ss_res / ss_tot
+  RMSE <- sqrt(mean(datos_finales$residuo_osa^2, na.rm = TRUE))
+  
+  cat("    ✔ Métricas OSA:\n")
+  cat("      R²   =", round(R2, 4), "\n")
+  cat("      RMSE =", round(RMSE, 2), "\n\n")
+  
+  # ---------------------------------------------------------
+  # Retornar lista con todos los resultados
+  # ---------------------------------------------------------
+  return(list(
+    pais           = pais_nombre,
+    modelo         = modelo_final,
+    datos          = datos_finales,
+    umbrales       = c(HT = mejor$HT, HP = mejor$HP),
+    coeficientes   = c(c0 = mejor$c0, cI = mejor$cI,
+                       cP = mejor$cP, cP2 = mejor$cP2,
+                       cT = mejor$cT, cT2 = mejor$cT2),
+    theta          = mejor$theta,
+    metricas       = c(AIC = mejor$AIC, R2 = R2, RMSE = RMSE),
+    grid_completo  = resultados_grid
+  ))
+}
+
+cat("✔ Función ajustar_etsir_osa() corregida y lista para usar.\n")
+```
+
+```{r ajuste modelo OSA}
+#==============================================================================
+# DIAGNÓSTICO PRE-AJUSTE: Verificar que los datos están listos
+#==============================================================================
+# 
+# cat("  DIAGNÓSTICO DE DATOS PARA MODELADO ETSIR\n")
+# 
+# # Verificar cada país
+# for (p in unique(datos_master$pais)) {
+#   cat("──", p, "──\n")
+#   
+#   datos_p <- datos_master %>% filter(pais == p)
+#   
+#   # 1. Verificar NAs
+#   nas_criticos <- sum(is.na(datos_p$I_t) | is.na(datos_p$I_t_1) | 
+#                        is.na(datos_p$acumulado_KI) | 
+#                        is.na(datos_p$temp_opt) | is.na(datos_p$precip_opt))
+#   cat("  NAs en variables críticas:", nas_criticos, "\n")
+#   
+#   # 2. Verificar variación
+#   cat("  Rango I_t:", range(datos_p$I_t, na.rm = TRUE), "\n")
+#   cat("  Rango temp_opt:", round(range(datos_p$temp_opt, na.rm = TRUE), 2), "\n")
+#   cat("  Rango precip_opt:", round(range(datos_p$precip_opt, na.rm = TRUE), 2), "\n")
+#   
+#   # 3. Verificar multicolinealidad
+#   cor_matrix <- cor(datos_p %>% select(I_t_1, acumulado_KI, temp_opt, precip_opt),
+#                     use = "complete.obs")
+#   cor_altas <- sum(abs(cor_matrix[upper.tri(cor_matrix)]) > 0.95)
+#   cat("  Pares con |r| > 0.95:", cor_altas, "\n")
+#   
+#   # 4. Prueba rápida de glm.nb
+#   datos_test <- datos_p %>%
+#     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+#            !is.na(temp_opt), !is.na(precip_opt)) %>%
+#     mutate(
+#       temp_tramo1 = temp_opt,
+#       temp_tramo2 = pmax(temp_opt - median(temp_opt), 0),
+#       precip_tramo1 = precip_opt,
+#       precip_tramo2 = pmax(precip_opt - median(precip_opt), 0)
+#     )
+#   
+#   mod_test <- tryCatch({
+#     MASS::glm.nb(
+#       I_t ~ I_t_1 + acumulado_KI + temp_tramo1 + temp_tramo2 + 
+#             precip_tramo1 + precip_tramo2,
+#       data = datos_test,
+#       control = glm.control(maxit = 250),
+#       init.theta = 1.5
+#     )
+#   }, error = function(e) {
+#     cat("  ⚠ Error en prueba glm.nb:", e$message, "\n")
+#     NULL
+#   })
+#   
+#   if (!is.null(mod_test)) {
+#     cat("  ✔ Prueba glm.nb: CONVERGIÓ (AIC =", round(AIC(mod_test), 1), ")\n")
+#   } else {
+#     cat("  ✗ Prueba glm.nb: FALLÓ\n")
+#   }
+#   
+#   cat("\n")
+# }
+# 
+# cat("✔ Diagnóstico completo. Si todas las pruebas fallan, revise la escala de las variables.\n")
+
+#==============================================================================
+# BLOQUE 4: AJUSTE DEL MODELO ETSIR-OSA PARA LOS 5 PAÍSES
+#==============================================================================
+
+# Filtrar datos listos para modelado (sin NAs en variables críticas)
+datos_modelado <- datos_master %>%
+  filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+         !is.na(temp_opt), !is.na(precip_opt))
+
+# Ajustar por país
+resultados_etsir_osa <- datos_modelado %>%
+  split(.$pais) %>%
+  map(~ ajustar_etsir_osa(.x))
+
+# Consolidar métricas en tabla
+tabla_metricas_osa <- map_dfr(resultados_etsir_osa, ~ {
+  tibble(
+    País     = .x$pais,
+    `H_T (°C)` = round(.x$umbrales["HT"], 2),
+    `H_P (mm)` = round(.x$umbrales["HP"], 2),
+    `c₀`     = round(.x$coeficientes["c0"], 4),
+    `c_I`    = round(.x$coeficientes["cI"], 4),
+    `c_T`    = round(.x$coeficientes["cT"], 4),
+    `c_T'`   = round(.x$coeficientes["cT2"], 4),
+    `c_P`    = round(.x$coeficientes["cP"], 4),
+    `c_P'`   = round(.x$coeficientes["cP2"], 4),
+    `θ`      = round(.x$theta, 3),
+    AIC      = round(.x$metricas["AIC"], 1),
+    `R²`     = round(.x$metricas["R2"], 4),
+    RMSE     = round(.x$metricas["RMSE"], 1)
+  )
+})
+
+# Renderizar tabla
+tabla_metricas_osa %>%
+  kbl(caption = "Resultados del Modelo ETSIR One-Step-Ahead por País",
+      format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
+```  
+```{r analisis OSA}
+#==============================================================================
+# BLOQUE 5: DIAGNÓSTICO DEL MODELO ETSIR-OSA
+#==============================================================================
+
+# ---------------------------------------------------------
+# 14.1 Gráfico de series observadas vs. predichas (OSA)
+# ---------------------------------------------------------
+datos_predichos <- map_dfr(resultados_etsir_osa, ~ .x$datos)
+
+ggplot(datos_predichos, aes(x = fecha_semana)) +
+  geom_line(aes(y = I_t, color = "Observado"), linewidth = 0.5) +
+  geom_line(aes(y = mu_osa, color = "Predicho OSA"), 
+            linewidth = 0.6, linetype = "dashed") +
+  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Observado" = "#2c3e50", 
+                                 "Predicho OSA" = "#e74c3c")) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title    = "Modelo ETSIR One-Step-Ahead: Observado vs. Predicho",
+    subtitle = "Las líneas rojas punteadas son las predicciones μ_t del modelo",
+    x = "Fecha", y = "Casos semanales", color = "Serie"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom",
+        strip.background = element_rect(fill = "#34495e"),
+        strip.text = element_text(color = "white", face = "bold"))
+
+# ---------------------------------------------------------
+# 14.2 Gráfico de residuos (homocedasticidad)
+# ---------------------------------------------------------
+ggplot(datos_predichos, aes(x = mu_osa, y = residuo_osa, color = pais)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.8) +
+  facet_wrap(~ pais, scales = "free", ncol = 3) +
+  scale_color_manual(values = PALETA_PAISES) +
+  scale_y_continuous(labels = comma_format()) +
+  labs(
+    title    = "Residuos del Modelo ETSIR-OSA",
+    subtitle = "Patrón horizontal = buen ajuste; curva = posible misspecification",
+    x = "Valor ajustado (μ_t)", y = "Residuo (I_t - μ_t)", color = "País"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "none")
+
+# ---------------------------------------------------------
+# 14.3 ACF de residuos (verificar independencia)
+# ---------------------------------------------------------
+par(mfrow = c(2, 3))
+for (p in unique(datos_predichos$pais)) {
+  residuos_pais <- datos_predichos %>%
+    filter(pais == p) %>%
+    pull(residuo_osa)
+  acf(residuos_pais, main = p, lag.max = 30, 
+      col = "#e74c3c", lwd = 2)
+}
+par(mfrow = c(1, 1))
+cat("\n  → Si la ACF decae rápidamente, el modelo captura bien la dinámica.\n")
+cat("  → Si hay picos significativos en rezagos altos, se requiere MSA.\n")
+```  
+
+### 1pausa
+:::
+
+::: {#seccion-2-2 .content-card}
+
+### 1pausa
+:::
+
+::: {#seccion-2-3 .content-card}
+
+### 1pausa
+:::
