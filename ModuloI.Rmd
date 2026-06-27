@@ -55,7 +55,7 @@ Esto permite detectar conflictos de versiones antes de ejecutar el pipeline comp
 paquetes_necesarios <- c(
   "readr", "dplyr", "tidyr", "purrr", "lubridate",
   "MMWRweek", "zoo", "ggplot2", "scales", "kableExtra",
-  "nasapower", "MASS", "lubridate"
+  "nasapower", "MASS"
 )
 
 for (pkg in paquetes_necesarios) {
@@ -129,9 +129,8 @@ dengue_raw <- read_csv(archivo_local, show_col_types = FALSE)
 cat("Registros brutos leídos:", nrow(dengue_raw), "\n")
 
 # 1.3 Limpieza de espacios invisibles y filtrado
-dengue_filtrado <- dengue_raw %>%
-  mutate(
-    ISO_limpio = trimws(toupper(ISO_A0)),
+dengue_semanal_raw <- dengue_raw %>%
+  mutate(ISO_limpio = trimws(toupper(ISO_A0)),
     pais_limpio = trimws(adm_0_name)
   ) %>%
   filter(
@@ -139,17 +138,27 @@ dengue_filtrado <- dengue_raw %>%
     Year >= ANIO_INICIO,
     Year <= ANIO_FIN
   ) %>%
-  # 1.4 Mapeo ISO → Nombre estandarizado
   mutate(
+    fecha_semana = as.Date(calendar_start_date),
+    semana_epi   = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi     = MMWRweek(fecha_semana)$MMWRyear,
     pais = case_when(
       ISO_limpio == "CRI" ~ "Costa Rica",
       ISO_limpio == "DOM" ~ "República Dominicana",
       ISO_limpio == "COL" ~ "Colombia",
       ISO_limpio == "HND" ~ "Honduras",
-      ISO_limpio == "MEX" ~ "México",
-      TRUE ~ NA_character_
-    )
-  )
+      ISO_limpio == "MEX" ~ "México"
+    ),
+    codigo_iso = ISO_limpio
+  ) %>%
+  group_by(pais, codigo_iso, anio_epi, semana_epi) %>%
+  summarise(
+    casos_totales = sum(dengue_total, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(fecha_semana = as.Date(MMWRweek2Date(anio_epi, semana_epi))) %>%
+  arrange(pais, anio_epi, semana_epi)
+
 
 # 1.5 Agregación municipal → nacional por semana
 #==============================================================================
@@ -159,36 +168,7 @@ dengue_filtrado <- dengue_raw %>%
 # convertía a MMWR, generando duplicados cuando dos fechas caían en la misma
 # semana epidemiológica. La solución es agrupar DIRECTAMENTE por MMWR.
 
-dengue_semanal_raw <- dengue_filtrado %>%
-  # 1. Convertir a fecha y MMWR ANTES de agrupar
-  mutate(
-    fecha_semana = as.Date(calendar_start_date),
-    semana_epi   = MMWRweek(fecha_semana)$MMWRweek,
-    anio_epi     = MMWRweek(fecha_semana)$MMWRyear
-  ) %>%
-  # 2. Mapear ISO → nombre país
-  mutate(
-    pais = case_when(
-      ISO_limpio == "CRI" ~ "Costa Rica",
-      ISO_limpio == "DOM" ~ "República Dominicana",
-      ISO_limpio == "COL" ~ "Colombia",
-      ISO_limpio == "HND" ~ "Honduras",
-      ISO_limpio == "MEX" ~ "México",
-      TRUE ~ NA_character_
-    ),
-    codigo_iso = ISO_limpio
-  ) %>%
-  # 3. AGRUPAR POR MMWR (no por calendar_start_date)
-  group_by(pais, codigo_iso, anio_epi, semana_epi) %>%
-  summarise(
-    casos_totales = sum(dengue_total, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  # 4. Reconstruir fecha de inicio de semana MMWR (domingo)
-  mutate(
-    fecha_semana = as.Date(MMWRweek2Date(anio_epi, semana_epi))
-  ) %>%
-  arrange(pais, anio_epi, semana_epi)
+
 
 # Validación inmediata: no debe haber duplicados
 stopifnot(
@@ -283,6 +263,8 @@ dengue_continuo <- dengue_continuo %>%
 
 cat("Filas en malla completa:", nrow(dengue_continuo), "\n")
 cat("NAs restantes en casos_totales:", sum(is.na(dengue_continuo$casos_totales)), "\n")
+
+
 ```
 
 ### 2pausa
@@ -727,8 +709,12 @@ datos_master <- datos_master %>%
   ungroup()
 
 cat("NAs restantes después de imputación:\n")
-cat("Total:", sum(is.na(datos_master %>%
-  dplyr::select(temp_K2, temp_K4,  temp_K6, temp_K8, temp_K12, temp_K16, temp_K22, precip_K2, precip_K4, precip_K6, precip_K8, precip_K12, precip_K16, precip_K22))), "\n")
+cat("NAs en ventanas climáticas candidatas:",
+    sum(is.na(datos_master %>% dplyr::select(starts_with("temp_K"), starts_with("precip_K")))),
+    "\n")
+cat("NAs en variables óptimas seleccionadas:",
+    sum(is.na(datos_master$temp_opt)) + sum(is.na(datos_master$precip_opt)),
+    "\n")
 
 ```
 
@@ -1096,9 +1082,9 @@ tabla_outliers <- outliers_casos %>%
 
 cat("TEST 4 - Picos epidémicos detectados (no son errores):\n")
 kbl(tabla_outliers, escape = FALSE, format = "html",
-    caption = "Ventanas Climáticas Óptimas Seleccionadas por Criterios de Información") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
-                full_width = FALSE, 
+    caption = "Picos Epidémicos Detectados por País (Outliers > 3×IQR)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
                 position = "center") %>%
   row_spec(0, background = "#2c3e50", color = "white", bold = TRUE)
 
@@ -1355,7 +1341,7 @@ ggplot(datos_master, aes(x = precip_K4, y = I_t, color = pais)) +
     title    = "Precipitación Acumulada (K4 semanas) vs. Transmisión",
     subtitle = "Curva LOESS para identificar umbrales de lluvia",
     x = "Precipitación acumulada (mm, K=4 sem)",
-    y = "Casos semanales (escala log₁₀)"
+    y = "Casos semanales (escala log10)"
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "none",
@@ -1378,22 +1364,21 @@ resumen_final <- datos_master %>%
     Rango_Años       = paste(min(anio_epi), "-", max(anio_epi)),
     Media_I_t        = round(mean(I_t, na.rm = TRUE), 1),
     Max_I_t          = max(I_t, na.rm = TRUE),
-    NAs_Clima        = sum(is.na(temp_K4)) + sum(is.na(precip_K4)),
-    Media_Temp_K4    = round(mean(temp_K4, na.rm = TRUE), 2),
-    Media_Precip_K4  = round(mean(precip_K4, na.rm = TRUE), 1),
+    K_T_Seleccionada = unique(K_T_opt),
+    K_P_Seleccionada = unique(K_P_opt),
+    Media_Temp_Opt   = round(mean(temp_opt, na.rm = TRUE), 2),
+    Media_Precip_Opt = round(mean(precip_opt, na.rm = TRUE), 1),
     .groups = "drop"
   )
 
 kbl(resumen_final,
     caption = "Resumen de la Base de Datos Final por País",
-    col.names = c("País", "Semanas", "Rango Años", "Media I_t",
-                  "Máx I_t", "NAs Clima", "Media Temp (K4)", "Media Precip (K4)"),
-    align = "lccccccc",
+    col.names = c("País", "Semanas", "Rango Años", "Media I_t", "Máx I_t",
+                  "K_T (sem)", "K_P (sem)", "Media Temp Ópt", "Media Precip Ópt"),
+    align = "lccccccccc",
     format = "html") %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = TRUE
-  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
   row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
 
 cat("\n✔ Pipeline completo. Base de datos lista para modelado ETSIR.\n")
@@ -1499,7 +1484,7 @@ gc(verbose = FALSE)
 cat("✔ Memoria liberada.\n")
 
 # --- 9.4 Verificar estado final del entorno ---
-cat("\n📦 Objetos disponibles para modelado ETSIR:\n")
+cat("\n Objetos disponibles para modelado ETSIR:\n")
 cat(paste(" •", ls(), collapse = "\n"), "\n\n")
 
 # --- 9.5 Resumen compacto de la base final ---
