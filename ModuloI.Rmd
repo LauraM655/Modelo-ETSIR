@@ -370,56 +370,119 @@ cat("Rango de I_t:", range(datos_etsir$I_t, na.rm = TRUE), "\n")
 # BLOQUE 4: DATOS CLIMÁTICOS (NASA POWER)
 #==============================================================================
 
-# 4.1 Coordenadas geográficas de referencia (capitales / áreas endémicas)
-coordenadas <- list(
-  "Costa Rica"           = c(lon = -84.08, lat = 9.93),
-  "República Dominicana" = c(lon = -69.93, lat = 18.48),
-  "Colombia"             = c(lon = -74.08, lat = 4.60),
-  "Honduras"             = c(lon = -87.20, lat = 14.10),
-  "México"               = c(lon = -99.13, lat = 19.43)
+# # 4.1 Coordenadas geográficas de referencia (capitales / áreas endémicas)
+# coordenadas <- list(
+#   "Costa Rica"           = c(lon = -84.08, lat = 9.93),
+#   "República Dominicana" = c(lon = -69.93, lat = 18.48),
+#   "Colombia"             = c(lon = -74.08, lat = 4.60),
+#   "Honduras"             = c(lon = -87.20, lat = 14.10),
+#   "México"               = c(lon = -99.13, lat = 19.43)
+# )
+# 
+# fecha_inicio_clima <- "2013-10-01"  # 3 meses antes para ventanas iniciales
+# fecha_fin_clima    <- "2024-12-31"
+# 
+# # 4.2 Descarga con manejo de errores
+# clima_diario <- names(coordenadas) %>%
+#   map_dfr(function(nom_pais) {
+#     coords <- coordenadas[[nom_pais]]
+#     tryCatch({
+#       data_nasa <- get_power(
+#         community    = "ag",
+#         lonlat       = c(coords["lon"], coords["lat"]),
+#         pars         = c("T2M", "PRECTOTCORR"),
+#         dates        = c(fecha_inicio_clima, fecha_fin_clima),
+#         temporal_api = "daily"
+#       )
+#       data_nasa %>%
+#         transmute(
+#           pais          = nom_pais,
+#           fecha         = as.Date(YYYYMMDD),
+#           temperatura   = T2M,
+#           precipitacion = PRECTOTCORR
+#         )
+#     }, error = function(e) {
+#       message("Error en descarga para ", nom_pais, ": ", e$message)
+#       message("Generando datos sintéticos de respaldo...")
+#       # --- Respaldo sintético si falla la API ---
+#       fechas <- seq.Date(as.Date(fecha_inicio_clima),
+#                          as.Date(fecha_fin_clima), by = "day")
+#       tibble(
+#         pais          = nom_pais,
+#         fecha         = fechas,
+#         # Simulación con estacionalidad tropical
+#         temperatura   = 25 + 3 * sin(2 * pi * as.numeric(fechas) / 365.25) +
+#                         rnorm(length(fechas), 0, 1.5),
+#         precipitacion = pmax(0, 5 + 8 * sin(2 * pi * as.numeric(fechas) / 365.25 - pi/3) +
+#                                rnorm(length(fechas), 0, 4))
+#       )
+#     })
+#   })
+# 
+# cat("Registros climáticos diarios:", nrow(clima_diario), "\n")
+
+#==============================================================================
+# BLOQUE 4: DATOS CLIMÁTICOS CON MÚLTIPLES CIUDADES (MEJORA DEL NUEVO CÓDIGO)
+#==============================================================================
+# Justificación: El código actual usaba 1 coordenada por país, lo cual es
+# un proxy pobre para países geográficamente diversos. El nuevo código
+# propone 3-5 ciudades por país, lo cual captura mejor la diversidad climática.
+
+# Coordenadas de múltiples ciudades por país (del nuevo código)
+coordenadas_ciudades <- tibble::tribble(
+  ~pais, ~ciudad, ~lon, ~lat,
+  # Colombia (5 ciudades: Caribe, Pacífico, Andes, Orinoquía)
+  "Colombia", "Barranquilla",  -74.80, 10.98,
+  "Colombia", "Cali",          -76.53,  3.45,
+  "Colombia", "Villavicencio", -73.63,  4.15,
+  "Colombia", "Cúcuta",        -72.50,  7.89,
+  "Colombia", "Bucaramanga",   -73.12,  7.13,
+  # Costa Rica (3 ciudades: Valle Central, Caribe, Pacífico)
+  "Costa Rica", "San José",    -84.08,  9.93,
+  "Costa Rica", "Limón",       -83.03,  9.99,
+  "Costa Rica", "Puntarenas",  -84.84,  9.98,
+  # Honduras (3 ciudades)
+  "Honduras", "Tegucigalpa",   -87.20, 14.10,
+  "Honduras", "San Pedro Sula",-88.03, 15.50,
+  "Honduras", "La Ceiba",      -86.79, 15.78,
+  # República Dominicana (3 ciudades)
+  "República Dominicana", "Santo Domingo", -69.90, 18.48,
+  "República Dominicana", "Santiago",      -70.69, 19.45,
+  "República Dominicana", "San Francisco de Macorís", -70.25, 19.30,
+  # México (5 ciudades: Norte, Centro, Sur, Costa)
+  "México", "Mérida",        -89.62, 20.97,
+  "México", "Veracruz",      -96.13, 19.17,
+  "México", "Acapulco",      -99.89, 16.85,
+  "México", "Guadalajara",  -103.35, 20.67,
+  "México", "Ciudad de México", -99.13, 19.43
 )
 
-fecha_inicio_clima <- "2013-10-01"  # 3 meses antes para ventanas iniciales
-fecha_fin_clima    <- "2024-12-31"
-
-# 4.2 Descarga con manejo de errores
-clima_diario <- names(coordenadas) %>%
-  map_dfr(function(nom_pais) {
-    coords <- coordenadas[[nom_pais]]
+# Descarga diaria NASA POWER para todas las ciudades
+clima_diario_ciudades <- coordenadas_ciudades %>%
+  pmap_dfr(function(pais, ciudad, lon, lat) {
     tryCatch({
       data_nasa <- get_power(
         community    = "ag",
-        lonlat       = c(coords["lon"], coords["lat"]),
+        lonlat       = c(lon, lat),
         pars         = c("T2M", "PRECTOTCORR"),
-        dates        = c(fecha_inicio_clima, fecha_fin_clima),
+        dates        = c("2013-10-01", "2024-12-31"),
         temporal_api = "daily"
       )
       data_nasa %>%
         transmute(
-          pais          = nom_pais,
+          pais          = pais,
+          ciudad        = ciudad,
           fecha         = as.Date(YYYYMMDD),
           temperatura   = T2M,
           precipitacion = PRECTOTCORR
         )
     }, error = function(e) {
-      message("Error en descarga para ", nom_pais, ": ", e$message)
-      message("Generando datos sintéticos de respaldo...")
-      # --- Respaldo sintético si falla la API ---
-      fechas <- seq.Date(as.Date(fecha_inicio_clima),
-                         as.Date(fecha_fin_clima), by = "day")
-      tibble(
-        pais          = nom_pais,
-        fecha         = fechas,
-        # Simulación con estacionalidad tropical
-        temperatura   = 25 + 3 * sin(2 * pi * as.numeric(fechas) / 365.25) +
-                        rnorm(length(fechas), 0, 1.5),
-        precipitacion = pmax(0, 5 + 8 * sin(2 * pi * as.numeric(fechas) / 365.25 - pi/3) +
-                               rnorm(length(fechas), 0, 4))
-      )
+      message("Error en ", ciudad, ": ", e$message)
+      return(NULL)
     })
   })
 
-cat("Registros climáticos diarios:", nrow(clima_diario), "\n")
+cat("Registros climáticos diarios:", nrow(clima_diario_ciudades), "\n")
 ```
 ### 4pausa
 
@@ -453,36 +516,97 @@ de acumulación sobre las series semanales.
 # BLOQUE 5: AGREGACIÓN SEMANAL Y VENTANAS MÓVILES CLIMÁTICAS
 #==============================================================================
 
-clima_semanal <- clima_diario %>%
-  # 5.1 Asignar semana epidemiológica a cada día
+# clima_semanal <- clima_diario %>%
+#   # 5.1 Asignar semana epidemiológica a cada día
+#   mutate(
+#     semana_epi = MMWRweek(fecha)$MMWRweek,
+#     anio_epi   = MMWRweek(fecha)$MMWRyear
+#   ) %>%
+#   # 5.2 Agregar a nivel semanal
+#   group_by(pais, anio_epi, semana_epi) %>%
+#   summarise(
+#     temp_semanal   = mean(temperatura, na.rm = TRUE),
+#     precip_semanal = sum(precipitacion, na.rm = TRUE),
+#     .groups = "drop"
+#   ) %>%
+#   # 5.3 Calcular ventanas móviles sobre las series semanales
+#   group_by(pais) %>%
+#   arrange(anio_epi, semana_epi) %>%
+#   mutate(
+#     # Ventanas de temperatura (promedio móvil)
+#     temp_K2 = rollapply(temp_semanal, width = 2, FUN = mean, fill = NA, align = "right"),
+#     temp_K4 = rollapply(temp_semanal, width = 4, FUN = mean, fill = NA, align = "right"),
+#     temp_K8 = rollapply(temp_semanal, width = 8, FUN = mean, fill = NA, align = "right"),
+# 
+#     # Ventanas de precipitación (suma móvil)
+#     precip_K2 = rollapply(precip_semanal, width = 2, FUN = sum, fill = NA, align = "right"),
+#     precip_K4 = rollapply(precip_semanal, width = 4, FUN = sum, fill = NA, align = "right"),
+#     precip_K8 = rollapply(precip_semanal, width = 8, FUN = sum, fill = NA, align = "right")
+#   ) %>%
+#   ungroup()
+# 
+# cat("Registros climáticos semanales:", nrow(clima_semanal), "\n")
+
+#==============================================================================
+# BLOQUE 5: AGREGACIÓN CLIMÁTICA CORREGIDA (SOLUCIONA ERRORES DEL NUEVO CÓDIGO)
+#==============================================================================
+# Corrección 1: Temperatura → promedio entre ciudades (intensiva, correcto)
+# Corrección 2: Precipitación → promedio entre ciudades (NO suma, porque
+#               cada ciudad representa un área geográfica distinta)
+# Corrección 3: Agregar a nivel semanal ANTES de ventanas móviles
+# Corrección 4: Ventanas móviles sobre series semanales (no diarias)
+
+clima_diario_pais <- clima_diario_ciudades %>%
+  group_by(pais, fecha) %>%
+  summarise(
+    # Temperatura: promedio entre ciudades (variable intensiva)
+    temperatura = mean(temperatura, na.rm = TRUE),
+    # Precipitación: promedio entre ciudades (representa "lluvia promedio 
+    # en el país", no "lluvia total del país")
+    precipitacion = mean(precipitacion, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Agregar a nivel semanal PRIMERO
+clima_semanal_base <- clima_diario_pais %>%
   mutate(
     semana_epi = MMWRweek(fecha)$MMWRweek,
     anio_epi   = MMWRweek(fecha)$MMWRyear
   ) %>%
-  # 5.2 Agregar a nivel semanal
   group_by(pais, anio_epi, semana_epi) %>%
   summarise(
     temp_semanal   = mean(temperatura, na.rm = TRUE),
-    precip_semanal = sum(precipitacion, na.rm = TRUE),
+    precip_semanal = sum(precipitacion, na.rm = TRUE),  # Suma semanal
     .groups = "drop"
-  ) %>%
-  # 5.3 Calcular ventanas móviles sobre las series semanales
+  )
+
+# Calcular ventanas móviles SOBRE series semanales (ventanas más granulares)
+clima_semanal <- clima_semanal_base %>%
   group_by(pais) %>%
   arrange(anio_epi, semana_epi) %>%
   mutate(
-    # Ventanas de temperatura (promedio móvil)
-    temp_K2 = rollapply(temp_semanal, width = 2, FUN = mean, fill = NA, align = "right"),
-    temp_K4 = rollapply(temp_semanal, width = 4, FUN = mean, fill = NA, align = "right"),
-    temp_K8 = rollapply(temp_semanal, width = 8, FUN = mean, fill = NA, align = "right"),
-
-    # Ventanas de precipitación (suma móvil)
-    precip_K2 = rollapply(precip_semanal, width = 2, FUN = sum, fill = NA, align = "right"),
-    precip_K4 = rollapply(precip_semanal, width = 4, FUN = sum, fill = NA, align = "right"),
-    precip_K8 = rollapply(precip_semanal, width = 8, FUN = sum, fill = NA, align = "right")
+    # Ventanas de temperatura (en semanas): 2, 4, 8, 12, 16, 22
+    temp_K2  = rollapply(temp_semanal, 2,  mean, fill = NA, align = "right"),
+    temp_K4  = rollapply(temp_semanal, 4,  mean, fill = NA, align = "right"),
+    temp_K6  = rollapply(temp_semanal, 6,  mean, fill = NA, align = "right"),
+    temp_K8  = rollapply(temp_semanal, 8,  mean, fill = NA, align = "right"),
+    temp_K12 = rollapply(temp_semanal, 12, mean, fill = NA, align = "right"),
+    temp_K16 = rollapply(temp_semanal, 16, mean, fill = NA, align = "right"),
+    temp_K22 = rollapply(temp_semanal, 22, mean, fill = NA, align = "right"),
+    
+    # Ventanas de precipitación (en semanas): 2, 4, 8, 12, 16, 22
+    precip_K2  = rollapply(precip_semanal, 2,  sum, fill = NA, align = "right"),
+    precip_K4  = rollapply(precip_semanal, 4,  sum, fill = NA, align = "right"),
+    precip_K6  = rollapply(precip_semanal, 6,  sum, fill = NA, align = "right"),
+    precip_K8  = rollapply(precip_semanal, 8,  sum, fill = NA, align = "right"),
+    precip_K12 = rollapply(precip_semanal, 12, sum, fill = NA, align = "right"),
+    precip_K16 = rollapply(precip_semanal, 16, sum, fill = NA, align = "right"),
+    precip_K22 = rollapply(precip_semanal, 22, sum, fill = NA, align = "right")
   ) %>%
   ungroup()
 
 cat("Registros climáticos semanales:", nrow(clima_semanal), "\n")
+
 ```
 
 ### 5pausa
@@ -518,8 +642,8 @@ datos_master <- datos_etsir %>%
   left_join(
     clima_semanal %>% dplyr::select(pais, anio_epi, semana_epi,
                              temp_semanal, precip_semanal,
-                             temp_K2, temp_K4, temp_K8,
-                             precip_K2, precip_K4, precip_K8),
+                             temp_K2, temp_K4,  temp_K6, temp_K8, temp_K12, temp_K16, temp_K22, 
+                             precip_K2, precip_K4, precip_K6, precip_K8, precip_K12, precip_K16, precip_K22),
     by = c("pais", "anio_epi", "semana_epi")
   )
 
@@ -591,12 +715,12 @@ datos_master <- datos_master %>%
   mutate(
     # Imputación estacional para temperatura
     across(
-      c(temp_semanal, temp_K2, temp_K4, temp_K8),
+      c(temp_semanal, temp_K2, temp_K4,  temp_K6, temp_K8, temp_K12, temp_K16, temp_K22),
       ~ imputar_estacional(., semana_epi, anio_epi)
     ),
     # Imputación estacional para precipitación
     across(
-      c(precip_semanal, precip_K2, precip_K4, precip_K8),
+      c(precip_semanal, precip_K2, precip_K4, precip_K6, precip_K8, precip_K12, precip_K16, precip_K22),
       ~ imputar_estacional(., semana_epi, anio_epi)
     )
   ) %>%
@@ -604,18 +728,12 @@ datos_master <- datos_master %>%
 
 cat("NAs restantes después de imputación:\n")
 cat("Total:", sum(is.na(datos_master %>%
-  dplyr::select(temp_K2, temp_K4, temp_K8, precip_K2, precip_K4, precip_K8))), "\n")
+  dplyr::select(temp_K2, temp_K4,  temp_K6, temp_K8, temp_K12, temp_K16, temp_K22, precip_K2, precip_K4, precip_K6, precip_K8, precip_K12, precip_K16, precip_K22))), "\n")
+
 ```
 
 
-Los números en las columnas K_T y K_P representan el número de semanas de rezago (ventanas climáticas) en las que el clima impacta con mayor fuerza a la incidencia de casos en cada territorio:
-
-* Colombia ($K_T=4, K_P=8$): Los casos actuales están fuertemente ligados a la temperatura de hace 1 mes (4 semanas) y a las lluvias de hace 2 meses (8 semanas).
-* Costa Rica ($K_T=2, K_P=8$): La respuesta a la temperatura es más inmediata (2 semanas), pero el efecto de la precipitación requiere un acumulado de largo plazo (8 semanas).
-* Honduras ($K_T=8, K_P=4$): Es el caso inverso; las condiciones térmicas de hace 2 meses (8 semanas) preparan el entorno, mientras que las lluvias de hace 1 mes (4 semanas) terminan por disparar el brote.
-* México ($K_T=2, K_P=8$): Presenta exactamente el mismo patrón ecológico que Costa Rica.
-* República Dominicana ($K_T=8, K_P=8$): Es el país con la respuesta más tardía. Tanto los cambios de temperatura como las lluvias requieren un ciclo largo de 8 semanas para reflejarse óptimamente en el conteo de casos.
-
+Los números en las columnas K_T y K_P representan el número de semanas de rezago (ventanas climáticas) en las que el clima impacta con mayor fuerza a la incidencia de casos en cada territorio
 
 ```{r ventana-optima}
 #==============================================================================
@@ -625,21 +743,125 @@ Los números en las columnas K_T y K_P representan el número de semanas de reza
 # Incluir todas las ventanas simultáneamente genera multicolinealidad (r > 0.95)
 # e inflación de varianza en los coeficientes.
 
+# seleccionar_ventana_optima <- function(datos_pais) {
+#   k_t_opts <- c(2, 4, 6, 8, 12, 16, 22)
+#   k_p_opts <- c(2, 4, 6, 8, 12, 16, 22)
+# 
+#   resultados <- expand.grid(k_t = k_t_opts, k_p = k_p_opts) %>%
+#     rowwise() %>%
+#     mutate(
+#       aic = tryCatch({
+#         temp_var    <- paste0("temp_K", k_t)
+#         precip_var  <- paste0("precip_K", k_p)
+# 
+#         # RECOMENDACIÓN: Si sigue fallando, prueba quitando '+ acumulado_KI'
+#         formula_str <- sprintf("I_t ~ I_t_1 + acumulado_KI + %s + %s",
+#                                temp_var, precip_var)
+# 
+#         # Controles mejorados para forzar la convergencia de Theta
+#         mod <- glm.nb(as.formula(formula_str), data = datos_pais,
+#                       control = glm.control(maxit = 250), # Más iteraciones
+#                       init.theta = 1.38) # Inicialización sugerida basada en tu prueba exitosa
+#         AIC(mod)
+#       }, error = function(e) {
+#         # Imprime el error real en la consola para saber exactamente qué falló
+#         message(paste("Error en modelo:", e$message))
+#         return(Inf)
+#       }),
+#       bic = tryCatch({
+#         temp_var    <- paste0("temp_K", k_t)
+#         precip_var  <- paste0("precip_K", k_p)
+#         formula_str <- sprintf("I_t ~ I_t_1 + acumulado_KI + %s + %s",
+#                                temp_var, precip_var)
+#         mod <- glm.nb(as.formula(formula_str), data = datos_pais,
+#                       control = glm.control(maxit = 250),
+#                       init.theta = 1.38)
+#         BIC(mod)
+#       }, error = function(e) Inf)
+#     ) %>%
+#     ungroup()
+# 
+#   mejor <- resultados %>% filter(aic == min(aic, na.rm = TRUE)) %>% slice(1)
+# 
+#   return(list(
+#     pais = unique(datos_pais$pais),
+#     k_t_opt = mejor$k_t,
+#     k_p_opt = mejor$k_p,
+#     aic_min = mejor$aic,
+#     bic_min = mejor$bic
+#   ))
+# }
+# 
+# # Aplicar optimización por país
+# resultados_seleccion <- datos_master %>%
+#   split(.$pais) %>%
+#   map(~ seleccionar_ventana_optima(.x))
+# 
+# # Generar tabla con métricas enriquecidas
+# tabla_ventanas <- map_dfr(resultados_seleccion, ~ tibble(
+#   Pais    = .x$pais,
+#   `K_T (Temp)` = .x$k_t_opt,
+#   `K_P (Precip)` = .x$k_p_opt,
+#   `AIC Mínimo` = round(.x$aic_min, 2),
+#   `BIC Mínimo` = round(.x$bic_min, 2)
+# ))
+# 
+# 
+# # Asignar variables optimizadas al dataset
+# datos_master <- datos_master %>%
+#   left_join(
+#     tabla_ventanas %>% dplyr::select(Pais, K_T_opt = `K_T (Temp)`, K_P_opt = `K_P (Precip)`),
+#     by = c("pais" = "Pais")
+#   ) %>%
+#   rowwise() %>%
+#   mutate(
+#     temp_opt   = get(paste0("temp_K", K_T_opt)),
+#     precip_opt = get(paste0("precip_K", K_P_opt))
+#   ) %>%
+#   ungroup()
+# 
+# # RENDERIZAR TABLA CON DISEÑO MEJORADO
+# tabla_ventanas %>%
+#   mutate(
+#     `K_T (Temp)` = cell_spec(`K_T (Temp)`, "html",
+#                              color = "white", bold = TRUE),
+#     `K_P (Precip)` = cell_spec(`K_P (Precip)`, "html",
+#                              color = "white", bold = TRUE)
+#   ) %>%
+#   kbl(format = "html", escape = FALSE, caption = "Ventanas Climáticas Óptimas Seleccionadas por Criterios de Información") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+#                 full_width = FALSE,
+#                 position = "center") %>%
+#   row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
+
+
+
+
+
+
+
+
+#==============================================================================
+# BLOQUE 7 MEJORADO: SELECCIÓN DE VENTANA ÓPTIMA POR AIC (GRID AMPLIADO)
+#==============================================================================
+# Justificación: Con ventanas más granulares, el grid de búsqueda se expande
+# para encontrar la combinación óptima que maximice la verosimilitud del modelo.
+
 seleccionar_ventana_optima <- function(datos_pais) {
-  k_t_opts <- c(2, 4, 8)
-  k_p_opts <- c(2, 4, 8)
-  
+  k_t_opts <- c(2, 4, 6, 8, 12, 16, 22)
+  k_p_opts <- c(2, 4, 6, 8, 12, 16, 22)
+
   resultados <- expand.grid(k_t = k_t_opts, k_p = k_p_opts) %>%
     rowwise() %>%
     mutate(
       aic = tryCatch({
         temp_var    <- paste0("temp_K", k_t)
         precip_var  <- paste0("precip_K", k_p)
-        
+
         # RECOMENDACIÓN: Si sigue fallando, prueba quitando '+ acumulado_KI'
         formula_str <- sprintf("I_t ~ I_t_1 + acumulado_KI + %s + %s",
                                temp_var, precip_var)
-        
+
         # Controles mejorados para forzar la convergencia de Theta
         mod <- glm.nb(as.formula(formula_str), data = datos_pais,
                       control = glm.control(maxit = 250), # Más iteraciones
@@ -647,7 +869,7 @@ seleccionar_ventana_optima <- function(datos_pais) {
         AIC(mod)
       }, error = function(e) {
         # Imprime el error real en la consola para saber exactamente qué falló
-        message(paste("Error en modelo:", e$message)) 
+        message(paste("Error en modelo:", e$message))
         return(Inf)
       }),
       bic = tryCatch({
@@ -662,9 +884,9 @@ seleccionar_ventana_optima <- function(datos_pais) {
       }, error = function(e) Inf)
     ) %>%
     ungroup()
-  
+
   mejor <- resultados %>% filter(aic == min(aic, na.rm = TRUE)) %>% slice(1)
-  
+
   return(list(
     pais = unique(datos_pais$pais),
     k_t_opt = mejor$k_t,
@@ -681,43 +903,51 @@ resultados_seleccion <- datos_master %>%
 
 # Generar tabla con métricas enriquecidas
 tabla_ventanas <- map_dfr(resultados_seleccion, ~ tibble(
-  Pais    = .x$pais,
-  `K_T (Temp)` = .x$k_t_opt,
-  `K_P (Precip)` = .x$k_p_opt,
-  `AIC Mínimo` = round(.x$aic_min, 2),
-  `BIC Mínimo` = round(.x$bic_min, 2)
+  Pais          = .x$pais,
+  K_T_opt       = .x$k_t_opt,   # Nombre limpio sin espacios
+  K_P_opt       = .x$k_p_opt,   # Nombre limpio sin espacios
+  AIC_Minimo    = round(.x$aic_min, 2),
+  BIC_Minimo    = round(.x$bic_min, 2)
 ))
 
+
 # Asignar variables optimizadas al dataset
+# datos_master <- datos_master %>%
+#   left_join(
+#     tabla_ventanas %>% dplyr::select(Pais, K_T_opt = `K_T (Temp)`, K_P_opt = `K_P (Precip)`),
+#     by = c("pais" = "Pais")
+#   ) %>%
+#   rowwise() %>%
+#   mutate(
+#     temp_opt   = get(paste0("temp_K", K_T_opt)),
+#     precip_opt = get(paste0("precip_K", K_P_opt))
+#   ) %>%
+#   ungroup()
 datos_master <- datos_master %>%
+  # Limpiamos duplicados previos si existían por ejecuciones erróneas
+  dplyr::select(-any_of(c("K_T_opt", "K_P_opt", "temp_opt", "precip_opt"))) %>% 
   left_join(
-    tabla_ventanas %>% dplyr::select(Pais, K_T_opt = `K_T (Temp)`, K_P_opt = `K_P (Precip)`),
+    tabla_ventanas %>% dplyr::select(Pais, K_T_opt, K_P_opt),
     by = c("pais" = "Pais")
   ) %>%
   rowwise() %>%
   mutate(
+    # get() ahora leerá correctamente las columnas K_T_opt y K_P_opt recién acopladas
     temp_opt   = get(paste0("temp_K", K_T_opt)),
     precip_opt = get(paste0("precip_K", K_P_opt))
   ) %>%
   ungroup()
 
-# RENDERIZAR TABLA CON DISEÑO MEJORADO (Sin print ni cat)
+
+# RENDERIZAR TABLA CON DISEÑO MEJORADO
 tabla_ventanas %>%
   mutate(
-    `K_T (Temp)` = cell_spec(`K_T (Temp)`, "html", 
-                             color = "white", bold = TRUE,
-                             background = case_when(`K_T (Temp)` == 2 ~ "#3498db", 
-                                                    `K_T (Temp)` == 4 ~ "#e67e22", 
-                                                    `K_T (Temp)` == 8 ~ "#9b59b6")),
-    `K_P (Precip)` = cell_spec(`K_P (Precip)`, "html", 
-                             color = "white", bold = TRUE,
-                             background = case_when(`K_P (Precip)` == 2 ~ "#3498db", 
-                                                    `K_P (Precip)` == 4 ~ "#e67e22", 
-                                                    `K_P (Precip)` == 8 ~ "#9b59b6"))
+    K_T_opt = cell_spec(K_T_opt, "html", bold = TRUE),
+    K_P_opt = cell_spec(K_P_opt, "html", bold = TRUE)
   ) %>%
   kbl(format = "html", escape = FALSE, caption = "Ventanas Climáticas Óptimas Seleccionadas por Criterios de Información") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
-                full_width = FALSE, 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE,
                 position = "center") %>%
   row_spec(0, bold = TRUE, color = "white", background = "#2c3e50")
 
@@ -907,8 +1137,8 @@ ggplot(outliers_casos, aes(x = pais, y = I_t, fill = pais)) +
 #==============================================================================
 
 # Extraer solo las variables de ventanas
-vars_ventanas <- c("temp_K2", "temp_K4", "temp_K8",
-                   "precip_K2", "precip_K4", "precip_K8")
+vars_ventanas <- c("temp_K2", "temp_K4","temp_K6", "temp_K8","temp_K12","temp_K16","temp_K22",
+                   "precip_K2", "precip_K4","precip_K6", "precip_K8", "precip_K12","precip_K16", "precip_K22")
 
 cor_matrix <- datos_master %>%
   dplyr::select(all_of(vars_ventanas)) %>%
@@ -1227,6 +1457,56 @@ cat("\n✔ Base de datos lista para modelado ETSIR con MSA.\n")
 | Imputación casos | Interpolación lineal (`na.approx`) | Evita sesgo de atenuación que introducen los ceros |
 | Malla temporal | MMWR completa (1-53) × países | Garantiza continuidad para `lag()` y `rollapply()` |
 | Join clima-dengue | `left_join` por (pais, anio_epi, semana_epi) | Preserva todas las semanas epidemiológicas |
+
+```{r limpieza-memoria}
+#==============================================================================
+# BLOQUE 9: LIMPIEZA DE MEMORIA - PREPARACIÓN PARA MODELADO ETSIR
+#==============================================================================
+# Justificación: El pipeline generó objetos intermedios que ya no se necesitan.
+# Mantenerlos consume RAM y puede causar conflictos de nombres.
+# Conservamos: (1) base final, (2) parámetros estéticos, (3) resultados clave.
+
+# --- 9.1 Identificar objetos a conservar ---
+objetos_esenciales <- c(
+  # Base de datos final para modelado
+  "datos_master",
+  
+  # Parámetros globales del estudio
+  "PAISES_ISO", "ANIO_INICIO", "ANIO_FIN", "K_I",
+  "FACTOR_SUBREG", "USAR_SUBREGISTRO",
+  
+  # Elementos estéticos (paletas y temas)
+  "PALETA_PAISES",
+  
+  # Resultados de selección de ventanas (referencia rápida)
+  "tabla_ventanas",
+  
+  # Objeto de la malla base (útil para validaciones posteriores)
+  "dengue_continuo"
+)
+
+# --- 9.2 Eliminar todo lo demás ---
+objetos_actuales <- ls()
+objetos_a_eliminar <- setdiff(objetos_actuales, objetos_esenciales)
+
+if (length(objetos_a_eliminar) > 0) {
+  rm(list = objetos_a_eliminar)
+  cat("✔ Se eliminaron", length(objetos_a_eliminar), "objetos intermedios.\n")
+}
+
+# --- 9.3 Liberar memoria no utilizada por R ---
+gc(verbose = FALSE)
+cat("✔ Memoria liberada.\n")
+
+# --- 9.4 Verificar estado final del entorno ---
+cat("\n📦 Objetos disponibles para modelado ETSIR:\n")
+cat(paste(" •", ls(), collapse = "\n"), "\n\n")
+
+# --- 9.5 Resumen compacto de la base final ---
+cat("Dimensiones de datos_master:", dim(datos_master), "\n")
+cat(" Columnas disponibles:", paste(colnames(datos_master), collapse = ", "), "\n")
+```
+
 ### 9pausa
 
 :::

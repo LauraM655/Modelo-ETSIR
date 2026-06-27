@@ -1,0 +1,1534 @@
+::: index-box
+-   [1. llamado de bases de datos](#seccion-1-1)
+:::
+
+::: {#seccion-1-1 .content-card}
+### Carga y Filtrado Automatizado de Datos (OpenDengue) de Sudamérica/Latinoamérica (Costa Rica, Rep. Dominicana, Colombia, Honduras, México) (PAHO)
+
+<!-- Para garantizar la resolución semanal estricta de los últimos 11 años, se realiza una consulta directa a la API de Delphi Epidata, la cual extrae los registros oficiales de la OPS sincronizados por Semana Epidemiológica. -->
+
+```{r carga-datos-api, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+# 1. Instalar e importar la librería oficial si no está instalada
+if (!requireNamespace("epidatr", quietly = TRUE)) {
+  install.packages("epidatr")
+}
+library(epidatr)
+library(dplyr)
+library(purrr)
+library(lubridate) # Necesaria para extraer año y semana de la fecha
+
+# 2. Definir códigos geográficos ISO de la OPS para la API de Delphi
+# Formato requerido por la API para los 5 países seleccionados
+
+codigos_paises <- c("cr", "do", "co", "hn", "mx") 
+
+
+# 3. Definir el rango de Semanas Epidemiológicas 
+# Formato de la API: AAAASS (Año de 4 dígitos + Semana de 2 dígitos)
+rango_semanas <- epirange(201301, 202152)
+
+
+# 4. Descargar los datos iterando de manera segura sobre los países elegidos
+dengue_api_raw <- codigos_paises %>%
+  map_dfr(function(codigo) {
+    tryCatch({
+      pub_paho_dengue(regions = codigo, epiweeks = rango_semanas)
+    }, error = function(e) {
+      message(paste("Error descargando región:", codigo, "-", e$message))
+      return(NULL)
+    })
+  })
+
+# 5. Formatear y traducir variables asegurando la coincidencia de mayúsculas
+dengue_semanal <- dengue_api_raw %>%
+  transmute(
+    pais = case_when(
+      toupper(region) == "CR" ~ "Costa Rica",
+      toupper(region) == "DO" ~ "República Dominicana",
+      toupper(region) == "CO" ~ "Colombia",
+      toupper(region) == "HN" ~ "Honduras",
+      toupper(region) == "MX" ~ "México"
+    ),
+    codigo_iso = toupper(region),
+    fecha_semana = epiweek,                      
+    anio = year(epiweek),                        
+    semana = epiweek(epiweek),                   
+    casos_totales = num_dengue,                  
+    casos_graves = num_severe,                   
+    defunciones = num_deaths,                    
+    poblacion_total = total_pop                  
+  ) %>%
+  arrange(pais, fecha_semana)
+
+# 6. Desplegar muestra interactiva adaptada al tema Flatly
+knitr::kable(head(dengue_semanal, 12), 
+             caption = "Series de tiempo semanales obtenidas vía API Delphi (PAHO Dengue) para el Módulo I")
+summary(dengue_semanal)
+
+
+```
+
+Para asegurar la reproducibilidad del modelo y evitar fallos por conexiones de red externas, se realiza la lectura local del extracto temporal estandarizado del consorcio OpenDengue, aislando los registros semanales de interés.
+
+```{r carga-datos-local, message=FALSE, warning=FALSE, paged.print=TRUE}
+# 1. Cargar librerías esenciales
+library(readr)
+library(dplyr)
+library(lubridate)
+library(zoo)
+
+# 2. Definir la ruta local exacta de tu archivo
+archivo_local <- "Temporal_extract_V1_3_REDUCIDO.csv"
+
+# 3. Validar existencia física del archivo
+if (!file.exists(archivo_local)) {
+  stop(paste("¡Error crítico! El archivo", archivo_local, "no se encuentra en el directorio."))
+}
+
+# 4. Leer la base de datos local
+dengue_raw_ops <- read_csv(archivo_local, show_col_types = FALSE)
+
+# 5. Definir los códigos ISO exactos de 3 letras
+codigos_iso_interes <- c("CRI", "DOM", "COL", "HND", "MEX")
+
+dengue_semanal <- dengue_raw_ops %>%
+  mutate(
+    ISO_A0_limpio = trimws(toupper(ISO_A0))
+  ) %>%
+  filter(
+    ISO_A0_limpio %in% codigos_iso_interes,
+    T_res == "Week",
+    S_res == "Admin0",
+    Year >= 2014,
+    Year <= 2025
+  ) %>%
+  mutate(
+    pais = case_when(
+      ISO_A0_limpio == "CRI" ~ "Costa Rica",
+      ISO_A0_limpio == "DOM" ~ "República Dominicana",
+      ISO_A0_limpio == "COL" ~ "Colombia",
+      ISO_A0_limpio == "HND" ~ "Honduras",
+      ISO_A0_limpio == "MEX" ~ "México"
+    )
+  ) %>%
+  transmute(
+    pais,
+    codigo_iso = ISO_A0_limpio,
+    fecha_semana = calendar_start_date,
+    anio = as.integer(Year),
+    casos_totales = dengue_total
+  ) %>%
+  arrange(pais, fecha_semana)
+
+
+# ==============================================================================
+# CONSTRUCCIÓN DE VARIABLES DEL MODELO ETSIR
+# ==============================================================================
+
+# Valor inicial de K_I.
+# Posteriormente este parámetro será estimado mediante la metodología MSA.
+K_I <- 8
+
+dengue_semanal <- dengue_semanal %>%
+  group_by(pais) %>%
+  arrange(fecha_semana, .by_group = TRUE) %>%
+
+  # Variables básicas del modelo
+  mutate(
+    I_t = casos_totales,
+    I_t_1 = lag(I_t)
+  ) %>%
+
+  # Acumulado de casos de las K_I semanas anteriores
+  mutate(
+    acumulado_casos_KI = zoo::rollapply(
+      I_t_1,
+      width = K_I,
+      FUN = sum,
+      fill = NA,
+      align = "right"
+    )
+  ) %>%
+
+  ungroup()
+
+# ------------------------------------------------------------------------------
+# Resumen de verificación
+# ------------------------------------------------------------------------------
+
+print(summary(dengue_semanal))
+
+# ------------------------------------------------------------------------------
+# Visualización de la base construida
+# ------------------------------------------------------------------------------
+
+if (!requireNamespace("kableExtra", quietly = TRUE))
+  install.packages("kableExtra")
+
+library(kableExtra)
+
+dengue_semanal %>%
+  head(12) %>%
+  kbl(
+    caption = "Series semanales nacionales utilizadas en el modelo ETSIR (2014–2024)",
+    col.names = c(
+      "País",
+      "Código ISO",
+      "Fecha",
+      "Año",
+      "Casos",
+      "I_t",
+      "I_{t-1}",
+      "Acumulado K_I"
+    ),
+    align = c("l", "c", "c", "c", "r", "r", "r", "r"),
+    format = "html"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = TRUE,
+    position = "center",
+    font_size = 13
+  ) %>%
+  row_spec(
+    0,
+    bold = TRUE,
+    color = "#ffffff",
+    background = "#2c3e50"
+  ) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(6, bold = TRUE, color = "#e74c3c") %>%
+  collapse_rows(columns = 1:2, valign = "top")
+```
+
+
+### Integración de Datos de Precipitación y Temperatura (NASA POWER)
+
+A continuación, se realiza la extracción automatizada de registros diarios de precipitación (mm) y temperatura (°C) mediante la API de la NASA, calculando indicadores continuos acumulados en ventanas móviles de $K_P$ y $K_T$ días para acoplarlos con las series epidemiológicas.
+
+Para evitar sesgos biológicos, se calculan las ventanas móviles completas de Temperatura ($K_7$ a $K_{150}$) y Precipitación ($K_7$ a $K_{60}$) a nivel diario. Posteriormente, se sincronizan con las semanas epidemiológicas (MMWRweek) extrayendo el registro del último día de la semana, dejando la matriz lista para la optimización por el método MSA.
+
+```{r carga-clima-completo, message=FALSE, warning=FALSE}
+# ==============================================================================
+# INTEGRACIÓN DE DATOS CLIMÁTICOS (NASA POWER)
+# ==============================================================================
+
+# 1. Cargar librerías necesarias
+library(nasapower)
+library(dplyr)
+library(purrr)
+library(lubridate)
+library(zoo)
+
+# 2. Definir coordenadas representativas de cada país
+# Se utilizan las capitales nacionales como aproximación de las condiciones
+# climáticas para el análisis a escala país.
+
+#===========================================================
+# Ciudades representativas para cada país
+#===========================================================
+
+coordenadas_ciudades <- tibble::tribble(
+  ~pais, ~ciudad, ~lon, ~lat,
+
+  # Colombia
+  "Colombia", "Barranquilla", -74.80, 10.98,
+  "Colombia", "Cali",         -76.53,  3.45,
+  "Colombia", "Villavicencio",-73.63,  4.15,
+  "Colombia", "Cúcuta",       -72.50,  7.89,
+  "Colombia", "Bucaramanga",  -73.12,  7.13,
+
+  # Costa Rica
+  "Costa Rica", "San José",      -84.08,  9.93,
+  "Costa Rica", "Limón",         -83.03,  9.99,
+  "Costa Rica", "Puntarenas",    -84.84,  9.98,
+
+  # Honduras
+  "Honduras", "Tegucigalpa",     -87.20, 14.10,
+  "Honduras", "San Pedro Sula",  -88.03, 15.50,
+  "Honduras", "La Ceiba",        -86.79, 15.78,
+
+  # República Dominicana
+  "República Dominicana", "Santo Domingo",          -69.90, 18.48,
+  "República Dominicana", "Santiago",               -70.69, 19.45,
+  "República Dominicana", "San Francisco de Macorís",-70.25,19.30,
+
+  # México
+  "México", "Mérida",            -89.62, 20.97,
+  "México", "Veracruz",          -96.13, 19.17,
+  "México", "Acapulco",          -99.89, 16.85,
+  "México", "Guadalajara",      -103.35, 20.67,
+  "México", "Ciudad de México", -99.13, 19.43
+)
+
+
+# 3. Definir el período de estudio
+fecha_inicio <- "2014-01-01"
+fecha_fin    <- "2024-12-31"
+
+
+# 4. Valores iniciales de las ventanas móviles
+# Posteriormente K_T y K_P serán seleccionados mediante la metodología MSA.
+
+K_T_values <- c(7, 14, 30, 60, 90, 120, 150)
+K_P_values <- c(7, 14, 21, 30, 45, 60)
+
+
+
+
+#===========================================================
+# Descargar datos diarios desde NASA POWER
+# para todas las ciudades seleccionadas
+#===========================================================
+
+clima_diario_ciudades <- coordenadas_ciudades %>%
+
+  pmap_dfr(function(pais, ciudad, lon, lat){
+
+    cat("Descargando:", pais, "-", ciudad, "\n")
+
+    tryCatch({
+
+      data_nasa <- get_power(
+
+        community = "ag",
+
+        lonlat = c(lon, lat),
+
+        pars = c("T2M", "PRECTOTCORR"),
+
+        dates = c(fecha_inicio, fecha_fin),
+
+        temporal_api = "daily"
+
+      )
+
+      data_nasa %>%
+
+        transmute(
+
+          pais = pais,
+
+          ciudad = ciudad,
+
+          fecha = as.Date(YYYYMMDD),
+
+          temperatura = T2M,
+
+          precipitacion = PRECTOTCORR
+
+        )
+
+    },
+
+    error = function(e){
+
+      message(
+
+        paste(
+
+          "Error descargando",
+
+          ciudad,
+
+          "-",
+
+          e$message
+
+        )
+
+      )
+
+      return(NULL)
+
+    })
+
+  })
+
+
+#===========================================================
+# Promedio diario del clima por país
+#===========================================================
+
+clima_diario <- clima_diario_ciudades %>%
+
+  group_by(pais, fecha) %>%
+
+  summarise(
+
+    temperatura = mean(temperatura, na.rm = TRUE),
+
+    precipitacion = mean(precipitacion, na.rm = TRUE),
+
+    .groups = "drop"
+
+  )
+
+#===========================================================
+# Construcción de las ventanas móviles
+#===========================================================
+
+clima_procesado <- clima_diario %>%
+
+  group_by(pais) %>%
+
+  arrange(fecha, .by_group = TRUE) %>%
+
+  mutate(
+
+    temp_K7   = rollapply(temperatura, 7, mean, fill = NA, align = "right"),
+    temp_K14  = rollapply(temperatura,14, mean, fill = NA, align = "right"),
+    temp_K30  = rollapply(temperatura,30, mean, fill = NA, align = "right"),
+    temp_K60  = rollapply(temperatura,60, mean, fill = NA, align = "right"),
+    temp_K90  = rollapply(temperatura,90, mean, fill = NA, align = "right"),
+    temp_K120 = rollapply(temperatura,120, mean, fill = NA, align = "right"),
+    temp_K150 = rollapply(temperatura,150, mean, fill = NA, align = "right"),
+
+    precip_K7  = rollapply(precipitacion,7, mean, fill = NA, align = "right"),
+    precip_K14 = rollapply(precipitacion,14, mean, fill = NA, align = "right"),
+    precip_K21 = rollapply(precipitacion,21, mean, fill = NA, align = "right"),
+    precip_K30 = rollapply(precipitacion,30, mean, fill = NA, align = "right"),
+    precip_K45 = rollapply(precipitacion,45, mean, fill = NA, align = "right"),
+    precip_K60 = rollapply(precipitacion,60, mean, fill = NA, align = "right")
+
+  ) %>%
+
+  ungroup()
+
+
+
+
+# ==============================================================================
+# CREAR LLAVES EPIDEMIOLÓGICAS PARA EL EMPAREJAMIENTO
+# ==============================================================================
+
+library(MMWRweek)
+
+dengue_semanal <- dengue_semanal %>%
+  mutate(
+    semana_epi = MMWRweek(fecha_semana)$MMWRweek,
+    anio_epi   = MMWRweek(fecha_semana)$MMWRyear
+  )
+
+
+# ==============================================================================
+# CONVERTIR LOS DATOS DIARIOS A DATOS SEMANALES
+# ==============================================================================
+
+clima_semanal <- clima_procesado %>%
+  mutate(
+    semana_epi = MMWRweek(fecha)$MMWRweek,
+    anio_epi   = MMWRweek(fecha)$MMWRyear
+  ) %>%
+  group_by(pais, anio_epi, semana_epi) %>%
+  arrange(fecha, .by_group = TRUE) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>%
+  dplyr::select(
+    pais,
+    anio_epi,
+    semana_epi,
+    fecha,
+    starts_with("temp_K"),
+    starts_with("precip_K")
+  )
+
+
+
+# ==============================================================================
+# MATRIZ MAESTRA ETSIR
+# ==============================================================================
+
+datos_master <- dengue_semanal %>%
+  left_join(
+    clima_semanal,
+    by = c("pais", "anio_epi", "semana_epi")
+  )
+
+
+datos_master <- datos_master %>%
+  group_by(pais) %>%
+  mutate(
+    across(
+      starts_with("temp_K"),
+      ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+    ),
+    across(
+      starts_with("precip_K"),
+      ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+    )
+  ) %>%
+  ungroup()
+
+
+print("Resumen de la matriz maestra ETSIR")
+
+summary(datos_master)
+
+
+
+
+
+datos_master %>%
+  dplyr::select(
+    pais,
+    fecha_semana,
+    fecha
+  ) %>%
+  head(15)
+
+sum(is.na(datos_master$temp_K7))
+sum(is.na(datos_master$precip_K7))
+datos_master %>%
+  mutate(
+    diferencia = as.numeric(fecha - fecha_semana)
+  ) %>%
+  count(diferencia)
+
+
+
+datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    n = n(),
+    primera = min(fecha_semana),
+    ultima = max(fecha_semana)
+  )
+
+
+datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    semanas_duplicadas =
+      any(duplicated(fecha_semana))
+  )
+
+datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    diferencia_max =
+      max(diff(fecha_semana))
+  )
+```
+
+```{r}
+#===========================================================
+# Función de predicción One-Step-Ahead del modelo ETSIR
+#
+# Implementa la ecuación (1) propuesta por Wang y Zhang (2025),
+# calculando el número esperado de casos de dengue a partir
+# de la incidencia pasada y los efectos no lineales de la
+# temperatura y la precipitación.
+#===========================================================
+
+etsir_pred <- function(
+    data,
+    c0,
+    cI,
+    cP,
+    cP2,
+    HP,
+    cT,
+    cT2,
+    HT,
+    temp_var,
+    precip_var
+){
+
+  temperatura   <- data[[temp_var]]
+  precipitacion <- data[[precip_var]]
+
+  gT <- cT * temperatura +
+        cT2 * pmax(temperatura - HT, 0)
+
+  gP <- cP * precipitacion +
+        cP2 * pmax(precipitacion - HP, 0)
+
+  pred <- (
+      c0 +
+      cI * data$acumulado_casos_KI +
+      gT +
+      gP
+    ) * data$I_t_1
+
+  return(pred)
+
+}
+```
+
+
+
+
+```{r}
+#===========================================================
+# Predicción ETSIR para un paso hacia adelante
+#
+# Calcula el número esperado de casos utilizando la ecuación
+# del modelo ETSIR propuesta por Wang y Zhang (2025).
+#===========================================================
+
+etsir_step <- function(
+    I_lag,
+    suma_KI,
+    temperatura,
+    precipitacion,
+    c0,
+    cI,
+    cP,
+    cP2,
+    HP,
+    cT,
+    cT2,
+    HT
+){
+
+  gT <- cT * temperatura +
+        cT2 * pmax(temperatura - HT, 0)
+
+  gP <- cP * precipitacion +
+        cP2 * pmax(precipitacion - HP, 0)
+
+  # Número esperado de casos
+  pred <- (
+    c0 +
+    cI * suma_KI +
+    gT +
+    gP
+  ) * I_lag
+
+  # Restricción biológica:
+  # el número esperado de casos no puede ser negativo.
+  pred <- pmax(pred, 0)
+
+  return(pred)
+
+}
+```
+
+
+
+```{r}
+#===========================================================
+# Predicción Multiple-Step-Ahead (MSA)
+#
+# Genera predicciones recursivas de K pasos hacia adelante
+# utilizando la estructura del modelo ETSIR.
+#===========================================================
+
+msa_pred <- function(
+    historial,
+    temperatura,
+    precipitacion,
+    KI,
+    c0,
+    cI,
+    cP,
+    cP2,
+    HP,
+    cT,
+    cT2,
+    HT,
+    pasos = 20
+){
+
+  historia <- historial
+
+  predicciones <- numeric(pasos)
+
+  for(h in 1:pasos){
+
+    I_lag <- tail(historia, 1)
+
+    suma_KI <- sum(tail(historia, KI))
+
+    pred <- etsir_step(
+
+      I_lag = I_lag,
+
+      suma_KI = suma_KI,
+
+      temperatura = temperatura[h],
+
+      precipitacion = precipitacion[h],
+
+      c0 = c0,
+
+      cI = cI,
+
+      cP = cP,
+
+      cP2 = cP2,
+
+      HP = HP,
+
+      cT = cT,
+
+      cT2 = cT2,
+
+      HT = HT
+
+    )
+
+    # Evitar valores no finitos durante la optimización
+    if(!is.finite(pred)){
+
+      return(rep(NA, pasos))
+
+    }
+
+    predicciones[h] <- pred
+
+    historia <- c(historia, pred)
+
+  }
+
+  return(predicciones)
+
+}
+```
+
+
+
+
+```{r}
+
+
+#===========================================================
+# Función objetivo Multiple-Step-Ahead (MSA)
+#
+# Calcula el error cuadrático acumulado entre las
+# predicciones MSA del modelo ETSIR y los casos observados.
+# Esta función se utiliza como criterio de optimización para
+# estimar los parámetros del modelo.
+#===========================================================
+
+rss_msa <- function(
+
+    par,
+
+    datos,
+
+    KI = 8,
+
+    temp_var = "temp_K30",
+
+    precip_var = "precip_K21",
+
+    pasos = 20
+
+){
+
+  c0  <- par[1]
+  cI  <- par[2]
+  cP  <- par[3]
+  cP2 <- par[4]
+  HP  <- par[5]
+  cT  <- par[6]
+  cT2 <- par[7]
+  HT  <- par[8]
+
+  RSS <- 0
+
+  n <- nrow(datos)
+
+  for(i in KI:(n-pasos)){
+
+    historial <- datos$I_t[(i-KI+1):i]
+
+    temperatura <- datos[[temp_var]][(i+1):(i+pasos)]
+
+    precipitacion <- datos[[precip_var]][(i+1):(i+pasos)]
+
+    if(anyNA(temperatura) || anyNA(precipitacion)){
+
+      next
+
+    }
+
+    pred <- msa_pred(
+
+      historial = historial,
+
+      temperatura = temperatura,
+
+      precipitacion = precipitacion,
+
+      KI = KI,
+
+      c0 = c0,
+
+      cI = cI,
+
+      cP = cP,
+
+      cP2 = cP2,
+
+      HP = HP,
+
+      cT = cT,
+
+      cT2 = cT2,
+
+      HT = HT,
+
+      pasos = pasos
+
+    )
+
+    if(anyNA(pred)){
+
+      return(Inf)
+
+    }
+
+    real <- datos$I_t[(i+1):(i+pasos)]
+
+    RSS <- RSS + sum((real - pred)^2, na.rm = TRUE)
+
+  }
+
+  return(RSS)
+
+}
+```
+
+
+
+
+```{r}
+#===========================================================
+# Recalcular las variables dependientes de KI
+#===========================================================
+
+
+actualizar_KI <- function(datos, KI){
+
+  datos %>%
+    group_by(pais) %>%
+    arrange(fecha_semana, .by_group = TRUE) %>%
+    mutate(
+
+      I_t_1 = lag(I_t),
+
+      acumulado_casos_KI =
+  zoo::rollapply(
+    lag(I_t),
+    width = KI,
+    FUN = function(x) sum(x, na.rm = TRUE),
+    fill = NA,
+    align = "right"
+  )
+
+    ) %>%
+    ungroup()
+
+}
+
+#===========================================================
+# Valores candidatos para la búsqueda en malla
+#===========================================================
+
+KI_grid <- 4:12
+
+KT_grid <- c(7, 14, 30, 60)
+
+KP_grid <- c(7, 14, 21, 30)
+```
+
+
+
+
+
+```{r}
+#===========================================================
+# Función objetivo para optimizar los coeficientes
+# con HT y HP fijos
+#===========================================================
+
+rss_msa_coef <- function(
+    par,
+    datos,
+    KI = 8,
+    temp_var = "temp_K30",
+    precip_var = "precip_K21",
+    HT,
+    HP,
+    pasos = 20
+){
+
+  c0  <- par[1]
+  cI  <- par[2]
+  cP  <- par[3]
+  cP2 <- par[4]
+  cT  <- par[5]
+  cT2 <- par[6]
+
+  # Restricciones biológicas
+  if(c0 < 0 || cP < 0 || cT < 0 ||
+     cI > 0 || cP2 > 0 || cT2 > 0){
+
+    return(Inf)
+
+  }
+
+  RSS <- 0
+
+  n <- nrow(datos)
+
+  for(i in KI:(n - pasos)){
+
+    historial <- datos$I_t[(i - KI + 1):i]
+
+    temperatura <- datos[[temp_var]][(i + 1):(i + pasos)]
+
+    precipitacion <- datos[[precip_var]][(i + 1):(i + pasos)]
+
+    if(anyNA(temperatura) || anyNA(precipitacion))
+      next
+
+    pred <- msa_pred(
+
+      historial = historial,
+
+      temperatura = temperatura,
+
+      precipitacion = precipitacion,
+
+      KI = KI,
+
+      c0 = c0,
+
+      cI = cI,
+
+      cP = cP,
+
+      cP2 = cP2,
+
+      HP = HP,
+
+      cT = cT,
+
+      cT2 = cT2,
+
+      HT = HT,
+
+      pasos = pasos
+
+    )
+
+    if(anyNA(pred) || any(!is.finite(pred)))
+      return(Inf)
+
+    real <- datos$I_t[(i + 1):(i + pasos)]
+
+    RSS <- RSS + sum((real - pred)^2)
+
+  }
+
+  return(RSS)
+
+}
+```
+
+
+```{r}
+#===========================================================
+# Búsqueda en malla (Grid Search) para KI, KT y KP
+#
+# Evalúa todas las combinaciones de ventanas temporales
+# utilizando como criterio el RSS obtenido mediante el
+# método Multiple-Step-Ahead (MSA).
+#===========================================================
+
+
+
+#===========================================================
+# País a analizar
+#===========================================================
+
+nombre_pais <- "Colombia"
+
+
+datos_pais <- datos_master %>%
+  dplyr::filter(pais == nombre_pais)
+
+datos_pais <- actualizar_KI(
+  datos_pais,
+  KI = max(KI_grid)
+)
+
+# Valores iniciales de los parámetros
+par_inicial <- c(
+  c0  = 0.40,
+  cI  = -0.000001,
+  cP  = 0.03,
+  cP2 = -0.02,
+  HP  = 5,
+  cT  = 0.10,
+  cT2 = -0.05,
+  HT  = 20
+)
+
+resultados_grid <- data.frame()
+
+for(KI in KI_grid){
+
+  cat("\n=========================\n")
+  cat("Probando KI =", KI, "\n")
+
+  for(KT in KT_grid){
+
+    temp_var <- paste0("temp_K", KT)
+
+    for(KP in KP_grid){
+
+      precip_var <- paste0("precip_K", KP)
+
+      rss <- rss_msa(
+
+        par = par_inicial,
+
+        datos = datos_pais,
+
+        KI = KI,
+
+        temp_var = temp_var,
+
+        precip_var = precip_var,
+
+        pasos = 20
+
+      )
+
+      resultados_grid <- dplyr::bind_rows(
+
+        resultados_grid,
+
+        data.frame(
+
+          KI = KI,
+          KT = KT,
+          KP = KP,
+          RSS = rss
+
+        )
+
+      )
+
+    }
+
+  }
+
+}
+```
+
+
+```{r}
+#===========================================================
+# Búsqueda en malla para los umbrales HT y HP
+#===========================================================
+
+#===========================================================
+# Selección de las ventanas óptimas
+#===========================================================
+
+mejor_modelo <- resultados_grid %>%
+  arrange(RSS) %>%
+  slice(1)
+
+KI_opt <- mejor_modelo$KI
+KT_opt <- mejor_modelo$KT
+KP_opt <- mejor_modelo$KP
+
+temp_var <- paste0("temp_K", KT_opt)
+precip_var <- paste0("precip_K", KP_opt)
+
+#===========================================================
+# Definir los rangos candidatos para los umbrales
+#===========================================================
+
+HT_grid <- seq(
+  floor(min(datos_pais[[temp_var]], na.rm = TRUE)),
+  ceiling(max(datos_pais[[temp_var]], na.rm = TRUE)),
+  by = 0.5
+)
+
+HP_grid <- seq(
+  0,
+  ceiling(max(datos_pais[[precip_var]], na.rm = TRUE)),
+  by = 0.5
+)
+
+
+par_fijos <- c(
+  c0  = 0.40,
+  cI  = -0.000001,
+  cP  = 0.03,
+  cP2 = -0.02,
+  cT  = 0.10,
+  cT2 = -0.05
+)
+
+resultados_HP_HT <- data.frame()
+
+for(HT in HT_grid){
+
+  cat("HT =", HT, "\n")
+
+  for(HP in HP_grid){
+
+    rss <- rss_msa_coef(
+
+      par = par_fijos,
+
+      datos = datos_pais,
+
+      KI = KI_opt,
+
+      temp_var = temp_var,
+
+      precip_var = precip_var,
+
+      HT = HT,
+
+      HP = HP,
+
+      pasos = 20
+
+    )
+
+    resultados_HP_HT <- bind_rows(
+
+  resultados_HP_HT,
+
+  tibble(
+
+    HT = HT,
+    HP = HP,
+    RSS = rss
+
+  )
+
+)
+
+  }
+
+}
+
+#===========================================================
+# Mejor combinación de umbrales
+#===========================================================
+
+mejor_HT_HP <- resultados_HP_HT %>%
+  arrange(RSS) %>%
+  slice(1)
+
+print(mejor_HT_HP)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+#===========================================================
+# Seleccionar los umbrales óptimos
+#===========================================================
+
+mejor_HT_HP <- resultados_HP_HT %>%
+  arrange(RSS) %>%
+  slice(1)
+
+HT_opt <- mejor_HT_HP$HT
+HP_opt <- mejor_HT_HP$HP
+
+HT_opt
+HP_opt
+
+
+
+#===========================================================
+# Estimación final de los coeficientes del modelo ETSIR
+#===========================================================
+
+# Reescalar la incidencia semanal a miles de casos
+datos_escalados <- datos_pais %>%
+  mutate(
+    I_t = I_t / 1000
+  )
+
+# Valores iniciales
+par_fijos_iniciales <- c(
+  c0  = 0.50,
+  cI  = -0.01,
+  cP  = 0.01,
+  cP2 = -0.005,
+  cT  = 0.02,
+  cT2 = -0.01
+)
+
+modelo_final_pais <- optim(
+
+  par = par_fijos_iniciales,
+
+  fn = rss_msa_coef,
+
+  datos = datos_escalados,
+
+  KI = KI_opt,
+
+  temp_var = temp_var,
+
+  precip_var = precip_var,
+
+  HT = HT_opt,
+
+  HP = HP_opt,
+
+  pasos = 20,
+
+  method = "Nelder-Mead",
+
+  control = list(maxit = 1000)
+
+)
+
+coeficientes_finales <- modelo_final_pais$par
+
+coeficientes_finales
+```
+
+
+
+
+
+
+```{r}
+#===========================================================
+# Predicción final del modelo ETSIR
+#===========================================================
+
+datos_pred <- datos_pais %>%
+  mutate(
+    I_t = I_t / 1000,
+    I_t_1 = I_t_1 / 1000,
+    acumulado_casos_KI = acumulado_casos_KI / 1000
+  )
+
+pred_escalada <- etsir_pred(
+  data = datos_pred,
+  c0  = coeficientes_finales["c0"],
+  cI  = coeficientes_finales["cI"],
+  cP  = coeficientes_finales["cP"],
+  cP2 = coeficientes_finales["cP2"],
+  HP  = HP_opt,
+  cT  = coeficientes_finales["cT"],
+  cT2 = coeficientes_finales["cT2"],
+  HT  = HT_opt,
+  temp_var = temp_var,
+  precip_var = precip_var
+)
+
+pred_escalada <- pmax(pred_escalada, 0)
+
+pred_final <- pred_escalada * 1000
+
+summary(pred_final)
+range(pred_final, na.rm = TRUE)
+sum(pred_final < 0, na.rm = TRUE)
+```
+
+
+```{r}
+RMSE <- sqrt(mean((datos_pais$I_t - pred_final)^2, na.rm = TRUE))
+
+MAE <- mean(abs(datos_pais$I_t - pred_final), na.rm = TRUE)
+
+correlacion <- cor(
+  datos_pais$I_t,
+  pred_final,
+  use = "complete.obs"
+)
+
+cat("RMSE:", RMSE, "\n")
+cat("MAE:", MAE, "\n")
+cat("Correlación:", correlacion, "\n")
+```
+
+
+
+
+```{r}
+library(ggplot2)
+
+#===========================================================
+# Gráfico: Casos observados vs. predichos
+#===========================================================
+
+datos_grafico <- datos_pais %>%
+  mutate(Prediccion = pred_final) %>%
+  filter(!is.na(Prediccion))
+
+ggplot(datos_grafico, aes(x = fecha_semana)) +
+
+  geom_line(
+    aes(y = I_t, color = "Casos observados"),
+    linewidth = 0.8
+  ) +
+
+  geom_line(
+    aes(y = Prediccion, color = "Modelo ETSIR"),
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+
+  labs(
+    title = paste("Trayectoria ajustada del modelo ETSIR -", nombre_pais),
+    x = "Semana epidemiológica",
+    y = "Casos semanales de dengue",
+    color = ""
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Casos observados" = "#2c3e50",
+      "Modelo ETSIR" = "#e74c3c"
+    )
+  ) +
+
+  theme_minimal() +
+
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+```
+
+
+
+
+
+#predicciones:
+
+
+```{r}
+pred_msa <- function(
+    datos,
+    KI,
+    temp_var,
+    precip_var,
+    c0,
+    cI,
+    cP,
+    cP2,
+    HP,
+    cT,
+    cT2,
+    HT,
+    pasos = 10
+){
+
+  n <- nrow(datos)
+
+  pred <- rep(NA_real_, n)
+
+  for(i in KI:(n - pasos)){
+
+    historial <- datos$I_t[(i - KI + 1):i]
+
+    temperatura <- datos[[temp_var]][(i + 1):(i + pasos)]
+
+    precipitacion <- datos[[precip_var]][(i + 1):(i + pasos)]
+
+    pred_h <- msa_pred(
+
+      historial = historial,
+
+      temperatura = temperatura,
+
+      precipitacion = precipitacion,
+
+      KI = KI,
+
+      c0 = c0,
+
+      cI = cI,
+
+      cP = cP,
+
+      cP2 = cP2,
+
+      HP = HP,
+
+      cT = cT,
+
+      cT2 = cT2,
+
+      HT = HT,
+
+      pasos = pasos
+
+    )
+
+    # Guardamos únicamente la predicción del horizonte solicitado
+    pred[i + pasos] <- pred_h[pasos]
+
+  }
+
+  pred
+}
+```
+
+
+```{r}
+datos_pred <- datos_pais %>%
+  mutate(
+    I_t = I_t / 1000,
+    I_t_1 = I_t_1 / 1000,
+    acumulado_casos_KI = acumulado_casos_KI / 1000
+  )
+
+pred10 <- pred_msa(
+
+  datos = datos_pred,
+
+  KI = KI_opt,
+
+  temp_var = temp_var,
+
+  precip_var = precip_var,
+
+  c0 = coeficientes_finales["c0"],
+
+  cI = coeficientes_finales["cI"],
+
+  cP = coeficientes_finales["cP"],
+
+  cP2 = coeficientes_finales["cP2"],
+
+  HP = HP_opt,
+
+  cT = coeficientes_finales["cT"],
+
+  cT2 = coeficientes_finales["cT2"],
+
+  HT = HT_opt,
+
+  pasos = 10
+
+)
+
+pred10 <- pred10 * 1000
+
+
+
+summary(pred10)
+
+range(pred10, na.rm = TRUE)
+
+sum(pred10 < 0, na.rm = TRUE)
+
+sum(is.na(pred10))
+
+
+```
+
+
+
+```{r}
+RMSE10 <- sqrt(mean((datos_pais$I_t - pred10)^2, na.rm = TRUE))
+
+MAE10 <- mean(abs(datos_pais$I_t - pred10), na.rm = TRUE)
+
+Cor10 <- cor(
+  datos_pais$I_t,
+  pred10,
+  use = "complete.obs"
+)
+
+cat("RMSE (10 pasos):", RMSE10, "\n")
+cat("MAE (10 pasos):", MAE10, "\n")
+cat("Correlación (10 pasos):", Cor10, "\n")
+```
+
+
+
+```{r}
+grafico10 <- datos_pais %>%
+  mutate(Prediccion = pred10) %>%
+  filter(!is.na(Prediccion))
+
+ggplot(grafico10, aes(x = fecha_semana)) +
+
+  geom_line(
+    aes(y = I_t, color = "Casos observados"),
+    linewidth = 0.8
+  ) +
+
+  geom_line(
+    aes(y = Prediccion, color = "ETSIR (10 pasos)"),
+    linewidth = 0.8,
+    linetype = "dashed"
+  ) +
+
+  labs(
+    title = paste("Predicción ETSIR a 10 pasos adelante -", nombre_pais),
+    x = "Semana epidemiológica",
+    y = "Número de casos",
+    color = ""
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "Casos observados" = "#2c3e50",
+      "ETSIR (10 pasos)" = "#e74c3c"
+    )
+  ) +
+
+  theme_minimal() +
+
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+```
+
+
+```{r}
+resultados_HP_HT %>%
+  arrange(RSS) %>%
+  head(10)
+
+
+summary(datos_pais[[precip_var]])
+quantile(
+  datos_pais[[precip_var]],
+  probs = c(0,0.25,0.5,0.75,1)
+)
+
+library(ggplot2)
+
+ggplot(resultados_HP_HT,
+       aes(x = HP, y = RSS, colour = factor(HT))) +
+  geom_line() +
+  theme_minimal()
+
+```
+
+
+
+
+

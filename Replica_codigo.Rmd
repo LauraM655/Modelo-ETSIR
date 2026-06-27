@@ -43,12 +43,14 @@ knitr::opts_chunk$set(
 
 
 
-```{r, child='ModuloI.Rmd'}
+```{r ModuloI, child='ModuloI.Rmd'}
 # 👈 Este bloque mágico inserta todo el contenido del Capítulo 1 aquí
 ```
 
-## Módulo II: replica de base de datos
+## Módulo II: replica modelo ETSIR
 
-
+```{r ModuloII, child='ModuloII.Rmd'}
+# 👈 Este bloque mágico inserta todo el contenido del Capítulo 1 aquí
+```
 
 

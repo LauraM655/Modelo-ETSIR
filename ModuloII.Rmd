@@ -1,0 +1,189 @@
+
+::: index-box
+-   [0. Revisión teórica](#seccion-2-0)
+-   [1. Carga y Filtrado de Datos Epidemiológicos (OpenDengue)](#seccion-2-1)
+-   [2. Construcción de Malla Temporal Completa y Series Continuas](#seccion-2-2)
+-   [3. Ajuste por Subregistro (Opcional) y Variables del Modelo ETSIR](#seccion-2-3)
+-   [4. Descarga y Procesamiento de Datos Climáticos (NASA POWER)](#seccion-2-4)
+-   [5. Agregación Semanal del Clima y Ventanas Móviles](#seccion-2-5)
+-   [6. Merging Maestro: Epidemiología + Clima](#seccion-2-6)
+-   [7. Gestión de Valores Faltantes (Imputación Estacional)](#seccion-2-7)
+-   [8. Análisis Exploratorio y Validación de la Base de Datos](#seccion-2-8)
+-   [Apéndice: Guía Rápida de Decisiones](#seccion-2-9)
+:::
+
+::: {#seccion-1-0 .content-card}
+
+### Planteamiento Teórico del Modelo ETSIR
+
+A continuación presento la **formulación matemática completa** del modelo ETSIR según Wang & Zhang (2025), adaptada a tu base de datos.
+
+#### 1 Del modelo SIR al ETSIR: Cadena de derivación
+
+**Paso 1 — Modelo SIR determinístico en tiempo discreto:**
+
+$$I_t = \beta \cdot S_{t-1} \cdot I_{t-1}$$
+
+donde:
+
+- $I_t$ = número de infectados en la semana $t$
+- $S_{t-1}$ = número de susceptibles en $t-1$
+- $\beta$ = tasa de transmisión
+
+**Paso 2 — Modelado de susceptibles con inmunidad temporal:**
+
+$$S_{t-1} = N - \sum_{i=1}^{K_I} I_{t-i} + \sum_{i=1}^{K_I} B_{t-i} - \sum_{i=1}^{K_I} D_{t-i}$$
+
+donde $K_I$ es la ventana de inmunidad (en semanas), $B$ nacimientos y $D$ defunciones. Asumiendo nacimientos ≈ defunciones en ventanas cortas:
+
+$$S_{t-1} \approx N - \sum_{i=1}^{K_I} I_{t-i}$$
+
+**Paso 3 — Reparametrización:**
+
+Sustituyendo y definiendo $c_0 = N\beta$ y $c_I = -\beta$:
+
+$$\boxed{I_t = \left(c_0 + c_I \sum_{i=1}^{K_I} I_{t-i}\right) \cdot I_{t-1}}$$
+
+El término entre paréntesis es la **tasa de reproducción efectiva**, que decrece con la acumulación de inmunes.
+
+**Paso 4 — Incorporación de factores ambientales (ETSIR):**
+
+Los factores ambientales modifican la tasa de transmisión a través del período de incubación extrínseco (EIP) del virus en el mosquito. Sea $P_t$ precipitación y $T_t$ temperatura:
+
+$$\boxed{E(I_t \mid \mathcal{F}_{t-1}) = \left\{c_0 + c_I \sum_{k=1}^{K_I} I_{t-k} + g_P\!\left(\frac{1}{K_P}\sum_{k=1}^{K_P} P_{t-k}\right) + g_T\!\left(\frac{1}{K_T}\sum_{k=1}^{K_T} T_{t-k}\right)\right\} \cdot I_{t-1}}$$
+
+donde $\mathcal{F}_{t-1} = \{I_s, P_s, T_s : s < t\}$ es la historia pasada.
+
+#### 2 Funciones de respuesta ambiental (piecewise lineales)
+
+El artículo modela $g_P$ y $g_T$ como funciones lineales por tramos con **umbral** (forma de "V invertida"), motivado por la biología del mosquito:
+
+$$g_P(v) = c_P \cdot v + c_P' \cdot (v - H_P) \cdot \mathbb{1}(v > H_P)$$
+
+$$g_T(v) = c_T \cdot v + c_T' \cdot (v - H_T) \cdot \mathbb{1}(v > H_T)$$
+
+**Interpretación biológica:**
+
+- $c_P, c_T > 0$: efecto positivo inicial (más calor/lluvia → más mosquitos)
+- $c_P', c_T' < 0$: efecto negativo tras el umbral (calor extremo mata larvas; lluvias torrenciales las arrastran)
+- $H_P, H_T$: umbrales críticos específicos por región
+
+#### 3 Supuesto estocástico
+
+Dado que los conteos de dengue presentan **sobredispersión** (varianza > media), se asume:
+
+$$I_t \sim \text{NegBin}\big(E(I_t \mid \mathcal{F}_{t-1}),\, \theta\big)$$
+
+donde $\theta$ es el parámetro de dispersión. El artículo también considera $I_t \sim \text{Poisson}$ como caso particular.
+
+
+### Estimación MSA (Multiple-Step-Ahead)
+
+#### 1 ¿Por qué no usar MLE estándar (one-step-ahead)?
+
+El artículo demuestra que cuando el modelo está **mal especificado** (siempre ocurre en epidemiología) y hay **subregistro**, el estimador convencional de un paso no captura la **periodicidad** de la serie. La estimación MSA resuelve esto ajustando la trayectoria dinámica completa.
+
+#### 2 Función de pérdida MSA
+
+Sea $G(\cdot \mid \boldsymbol{\beta})$ la función de recursión del modelo. Definimos la predicción $k$-pasos-adelante:
+
+$$Y_{t+k \mid t}(\boldsymbol{\beta}) = G^{\otimes k}(Y_t \mid \boldsymbol{\beta}) = G\big(G(\cdots G(Y_t \mid \boldsymbol{\beta})\cdots \mid \boldsymbol{\beta})\big)$$
+
+El estimador MSA minimiza la suma de errores cuadráticos en $K$ pasos:
+
+$$\boxed{\hat{\boldsymbol{\beta}}_{[1:K]} = \arg\min_{\boldsymbol{\beta}} \; S_{[1:K]}(\boldsymbol{\beta}) = \arg\min_{\boldsymbol{\beta}} \sum_{k=1}^{K} \sum_{t=1}^{n-K} \left\{Y_{t+k} - Y_{t+k \mid t}(\boldsymbol{\beta})\right\}^2}$$
+
+#### 3 Propiedad fundamental (matching de ACF)
+
+El artículo demuestra que el estimador MSA satisface:
+
+$$\min_{\boldsymbol{\beta}} \sum_{k=1}^{K} \left\{\text{cov}(Y_{t+k}, Y_t) - \text{cov}\big(G^{\otimes k}(Y_t \mid \boldsymbol{\beta}), Y_t\big)\right\}^2 \leq \text{Var}(Y_t) \cdot S_{[1:K]}(\boldsymbol{\beta})$$
+
+**Consecuencia:** MSA ajusta automáticamente la **función de autocovarianza** del modelo a la de los datos, capturando periodicidad. Esto es crítico para dengue, que tiene ciclos anuales.
+
+#### 4 Inferencia vía Sieve Bootstrap
+
+Para obtener **p-valores** de los coeficientes, el artículo usa bootstrap de tamiz (Bühlmann, 1997):
+
+1. Ajustar $H_0$ (modelo sin el factor de interés, ej: sin temperatura) con MSA one-step-ahead.
+2. Generar series bootstrap:
+   $$Y_{t+1}^* = G_0(Y_t^*, Y_{t-1}^*, \ldots \mid \hat{\boldsymbol{\beta}}_0^{[1:1]}) + \hat{\varepsilon}_{t}^{1,1} \cdot e_t$$
+   donde $e_t \sim \text{Rademacher}$ (vale $\pm 1$ con prob. 0.5).
+3. Reajustar $H_0$ y $H_1$ sobre cada serie bootstrap y calcular:
+   $$T_{n,K} = \frac{RSS_0 - RSS_1}{RSS_1}$$
+4. El **p-valor bootstrap** es:
+   $$\hat{p} = \frac{1}{B}\sum_{b=1}^{B} \mathbb{1}\big(T_{n,K} \leq T_{n,K}^{*b}\big)$$
+
+
+### Formulación Operativa para tu Base de Datos
+
+
+#### 1 Vector de parámetros a estimar (por país)
+
+$$\boldsymbol{\theta} = \big(c_0,\; c_I,\; c_P,\; c_P',\; c_T,\; c_T',\; H_P,\; H_T,\; K_I,\; K_P,\; K_T,\; \theta\big)$$
+
+donde $\theta$ es el parámetro de dispersión del NegBin.
+
+#### 2 Variables observadas en tu base
+
+| Símbolo teórico | Variable en `datos_master` |
+|-----------------|----------------------------|
+| $I_t$ | `I_t` |
+| $I_{t-1}$ | `I_t_1` |
+| $\sum_{i=1}^{K_I} I_{t-i}$ | `acumulado_KI` (con $K_I=8$) |
+| $\frac{1}{K_T}\sum T_{t-k}$ | `temp_opt` (ya seleccionado por AIC) |
+| $\frac{1}{K_P}\sum P_{t-k}$ | `precip_opt` (ya seleccionado por AIC) |
+
+#### 3 Ecuación estimable en R (forma `glm.nb`)
+
+Para valores **fijos** de $H_T$ y $H_P$ (búsqueda por grid):
+
+```r
+# Forma lineal por tramos en R:
+# g_T(v) = c_T * v + c_T' * pmax(v - H_T, 0)
+# g_P(v) = c_P * v + c_P' * pmax(v - H_P, 0)
+
+datos_master <- datos_master %>%
+  mutate(
+    # Tramos lineales para temperatura (umbral H_T a buscar)
+    temp_tramo1 = temp_opt,
+    temp_tramo2 = pmax(temp_opt - H_T_candidato, 0),
+    
+    # Tramos lineales para precipitación (umbral H_P a buscar)
+    precip_tramo1 = precip_opt,
+    precip_tramo2 = pmax(precip_opt - H_P_candidato, 0)
+  )
+
+# Ajuste NegBin:
+modelo_etsir <- MASS::glm.nb(
+  I_t ~ I_t_1 + acumulado_KI + 
+        temp_tramo1 + temp_tramo2 + 
+        precip_tramo1 + precip_tramo2,
+  data = datos_master %>% filter(pais == "Colombia"),
+  control = glm.control(maxit = 250)
+)
+```
+
+#### 4 Algoritmo completo de estimación
+
+```
+Para cada país p ∈ {Colombia, Costa Rica, Honduras, México, R. Dominicana}:
+  
+  1. Fijar K_I = 8 (semanas de inmunidad)
+  2. Fijar K_T = tabla_ventanas[p, "K_T(Temp)"]
+  3. Fijar K_P = tabla_ventanas[p, "K_P(Precip)"]
+  
+  4. Para cada par (H_T, H_P) en grid:
+       a. Construir variables tramo1 y tramo2
+       b. Ajustar glm.nb
+       c. Calcular AIC
+  
+  5. Seleccionar (H_T*, H_P*) que minimice AIC
+  
+  6. Con (H_T*, H_P*) fijos, aplicar MSA con K pasos:
+       a. Definir función de recursión G(·)
+       b. Minimizar S_{[1:K]}(β) sobre β
+       c. Obtener β̂_MSA
+  
+  7. Bootstrap (B=500) para p-valores de cada coeficiente
+```
