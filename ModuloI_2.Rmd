@@ -512,6 +512,8 @@ datos_master %>%
   )
 ```
 
+### predicción One-Step-Ahead del modelo ETSIR
+
 ```{r}
 #===========================================================
 # Función de predicción One-Step-Ahead del modelo ETSIR
@@ -606,7 +608,7 @@ etsir_step <- function(
 }
 ```
 
-
+### Predicción Multiple-Step-Ahead (MSA)
 
 ```{r}
 #===========================================================
