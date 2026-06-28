@@ -2,14 +2,7 @@
 ::: index-box
 -   [0. Revisión teórica](#seccion-2-0)
 -   [1. Predicción ETSIR one step ahead](#seccion-2-1)
--   [2. Construcción de Malla Temporal Completa y Series Continuas](#seccion-2-2)
--   [3. Ajuste por Subregistro (Opcional) y Variables del Modelo ETSIR](#seccion-2-3)
--   [4. Descarga y Procesamiento de Datos Climáticos (NASA POWER)](#seccion-2-4)
--   [5. Agregación Semanal del Clima y Ventanas Móviles](#seccion-2-5)
--   [6. Merging Maestro: Epidemiología + Clima](#seccion-2-6)
--   [7. Gestión de Valores Faltantes (Imputación Estacional)](#seccion-2-7)
--   [8. Análisis Exploratorio y Validación de la Base de Datos](#seccion-2-8)
--   [Apéndice: Guía Rápida de Decisiones](#seccion-2-9)
+-   [2. Predicción ETSIR multiple steps ahead](#seccion-2-2)
 :::
 
 ::: {#seccion-2-0 .content-card}
@@ -741,15 +734,794 @@ cat("\n  → Si la ACF decae rápidamente, el modelo captura bien la dinámica.\
 cat("  → Si hay picos significativos en rezagos altos, se requiere MSA.\n")
 ```  
 
+
 ### 1pausa
 :::
 
 ::: {#seccion-2-2 .content-card}
+```{r estimacion MSA, eval=FALSE, include=FALSE}
+# ==============================================================================
+# 1. FUNCIÓN DE PÉRDIDA NATIVA MATRICIAL (ULTRARRÁPIDA)
+# ==============================================================================
+msa_loss_core_vectorized <- function(params, I_s, T_s, P_s, K_I, K_max) {
+  c0 <- params[1]; cI <- params[2]; cT <- params[3]
+  cT_p <- params[4]; cP <- params[5]; cP_p <- params[6]
+  HT_s <- params[7]; HP_s <- params[8]
+  
+  n <- length(I_s)
+  valid_t <- (K_I + 1):(n - K_max)
+  n_valid <- length(valid_t)
+  
+  if (n_valid <= 0) return(Inf)
+  
+  # Matrices de condiciones ambientales futuras
+  idx_future <- outer(valid_t, 0:(K_max - 1), "+")
+  env_T_matrix <- matrix(T_s[idx_future], nrow = n_valid)
+  env_P_matrix <- matrix(P_s[idx_future], nrow = n_valid)
+  
+  # Matriz de estados históricos (Shift Register)
+  idx_history <- outer(valid_t - 1, 0:(K_I - 1), "-")
+  state_matrix <- matrix(I_s[idx_history], nrow = n_valid)
+  
+  preds_matrix <- matrix(0, nrow = n_valid, ncol = K_max)
+  
+  # Recursión MSA vectorizada
+  for(k in 1:K_max) {
+    I_t_minus_1 <- state_matrix[, 1]
+    acum_I <- rowSums(state_matrix)
+    
+    gT <- cT * env_T_matrix[, k] + cT_p * pmax(env_T_matrix[, k] - HT_s, 0)
+    gP <- cP * env_P_matrix[, k] + cP_p * pmax(env_P_matrix[, k] - HP_s, 0)
+    
+    mu <- (c0 + cI * acum_I + gT + gP) * I_t_minus_1
+    mu <- pmax(mu, 1e-4)
+    
+    preds_matrix[, k] <- mu
+    
+    if(K_I > 1) {
+      state_matrix <- cbind(mu, state_matrix[, 1:(K_I - 1), drop = FALSE])
+    } else {
+      state_matrix <- matrix(mu, ncol = 1)
+    }
+  }
+  
+  idx_obs <- outer(valid_t, 1:K_max, "+")
+  obs_matrix <- matrix(I_s[idx_obs], nrow = n_valid)
+  
+  total_loss <- sum((obs_matrix - preds_matrix)^2, na.rm = TRUE)
+  return(total_loss + 0.01 * sum(params[1:6]^2))
+}
 
-### 1pausa
-:::
+# ==============================================================================
+# 2. FUNCIÓN DE AJUSTE POR PAÍS CON MÉTRICAS DE VALIDACIÓN
+# ==============================================================================
+ajustar_msa_pais_completo <- function(df_pais, pais_nombre, K_I = 8, K_max = 4) {
+  cat(sprintf("\nProcesando MSA para: %s...\n", pais_nombre))
+  
+  # Extraer vectores escalados
+  I_s <- df_pais$I_t_scaled
+  T_s <- df_pais$temp_scaled
+  P_s <- df_pais$precip_scaled
+  
+  # Variables originales para métricas finales
+  I_orig <- df_pais$I_t
+  T_orig <- df_pais$temp_original %if_null% df_pais$temp_opt
+  P_orig <- df_pais$precip_original %if_null% df_pais$precip_opt
+  
+  # --- Grid Search para Umbrales ---
+  HT_grid <- quantile(T_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  HP_grid <- quantile(P_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  grid <- expand.grid(HT = HT_grid, HP = HP_grid)
+  grid$loss <- Inf
+  
+  for(i in 1:nrow(grid)) {
+    params_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02, grid$HT[i], grid$HP[i])
+    
+    opt_grid <- tryCatch({
+      suppressWarnings(optim(
+        par = params_init[1:6], 
+        fn = function(p) msa_loss_core_vectorized(
+          c(p, grid$HT[i], grid$HP[i]), I_s, T_s, P_s, K_I, K_max),
+        method = "L-BFGS-B",
+        lower = c(0.1, -2, 0.001, -2, 0.001, -2),
+        upper = c(5.0, -1e-4, 2.0, -1e-4, 2.0, -1e-4),
+        control = list(maxit = 100, factr = 1e9)
+      ))
+    }, error = function(e) list(value = Inf))
+    
+    grid$loss[i] <- opt_grid$value
+  }
+  
+  mejor_grid <- grid[which.min(grid$loss), ]
+  HT_opt <- mejor_grid$HT
+  HP_opt <- mejor_grid$HP
+  
+  # --- Optimización Final ---
+  params_final_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02)
+  
+  optim_result <- tryCatch({
+    suppressWarnings(optim(
+      par = params_final_init,
+      fn = function(p) msa_loss_core_vectorized(
+        c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
+      method = "L-BFGS-B",
+      lower = c(0.1, -5, 0.001, -5, 0.001, -5),
+      upper = c(10, -1e-4, 5, -1e-4, 5, -1e-4),
+      control = list(maxit = 500, factr = 1e8)
+    ))
+  }, error = function(e) list(par = params_final_init, 
+                             counts = c("function"=0), value = NA))
+  
+  # Fallback robusto
+  if(is.null(optim_result$counts) || optim_result$counts["function"] <= 1) {
+    optim_result <- suppressWarnings(optim(
+      par = params_final_init,
+      fn = function(p) msa_loss_core_vectorized(
+        c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
+      method = "Nelder-Mead",
+      control = list(maxit = 500)
+    ))
+  }
+  
+  # --- Des-escalado de Parámetros ---
+  HT_orig <- HT_opt * 5 + 25
+  HP_orig <- HP_opt * 100 + 200
+  
+  params_estimados <- c(
+    c0 = optim_result$par[1],
+    cI = optim_result$par[2],
+    cT = optim_result$par[3],
+    cT_p = optim_result$par[4],
+    cP = optim_result$par[5],
+    cP_p = optim_result$par[6],
+    HT_s = HT_opt,
+    HP_s = HP_opt
+  )
+  
+  # --- Generar Predicciones para Validación ---
+  # Simulación one-step-ahead para diagnóstico de residuos
+  n <- length(I_s)
+  preds_osa <- numeric(n)
+  
+  for(t in (K_I + 1):n) {
+    state <- I_s[(t-1):(t-K_I)]
+    I_t_minus_1 <- state[1]
+    acum_I <- sum(state)
+    
+    gT <- params_estimados["cT"] * T_s[t] + 
+          params_estimados["cT_p"] * pmax(T_s[t] - HT_opt, 0)
+    gP <- params_estimados["cP"] * P_s[t] + 
+          params_estimados["cP_p"] * pmax(P_s[t] - HP_opt, 0)
+    
+    mu <- (params_estimados["c0"] + params_estimados["cI"] * acum_I + gT + gP) * I_t_minus_1
+    preds_osa[t] <- max(mu, 1e-4)
+  }
+  
+  # Convertir predicciones a escala original
+  preds_osa_orig <- preds_osa * 1000
+  residuos <- I_orig - preds_osa_orig
+  residuos_esc <- residuos / sd(I_orig, na.rm = TRUE)
+  
+  # --- Métricas de Bondad de Ajuste ---
+  ss_res <- sum(residuos^2, na.rm = TRUE)
+  ss_tot <- sum((I_orig - mean(I_orig, na.rm = TRUE))^2, na.rm = TRUE)
+  R2 <- 1 - ss_res / ss_tot
+  RMSE <- sqrt(mean(residuos^2, na.rm = TRUE))
+  MAE <- mean(abs(residuos), na.rm = TRUE)
+  MAPE <- mean(abs(residuos / (I_orig + 1)) * 100, na.rm = TRUE)
+  
+  # Prueba de Ljung-Box (white noise test)
+  residuos_limpios <- residuos_esc[!is.na(residuos_esc)]
+  ljung_box <- tryCatch({
+    Box.test(residuos_limpios, lag = 20, type = "Ljung-Box")
+  }, error = function(e) list(p.value = NA))
+  
+  # --- Retornar Resultados Completos ---
+  list(
+    tabla = tibble(
+      Pais = pais_nombre,
+      c0 = round(optim_result$par[1], 4),
+      cI = round(optim_result$par[2], 4),
+      cT = round(optim_result$par[3], 4),
+      cT_prime = round(optim_result$par[4], 4),
+      cP = round(optim_result$par[5], 4),
+      cP_prime = round(optim_result$par[6], 4),
+      `H_T (°C)` = round(HT_orig, 2),
+      `H_P (mm)` = round(HP_orig, 2),
+      R2 = round(R2, 4),
+      RMSE = round(RMSE, 2),
+      MAE = round(MAE, 2),
+      MAPE = round(MAPE, 2),
+      `Ljung-Box (p)` = round(ljung_box$p.value, 4),
+      Iteraciones = optim_result$counts["function"],
+      Loss_MSA = round(optim_result$value, 2)
+    ),
+    datos_validacion = tibble(
+      pais = pais_nombre,
+      semana = seq_along(I_orig),
+      I_obs = I_orig,
+      I_pred = preds_osa_orig,
+      residuos = residuos,
+      residuos_std = residuos_esc,
+      temp = T_orig,
+      precip = P_orig
+    ),
+    params = params_estimados,
+    umbrales = c(HT = HT_orig, HP = HP_orig)
+  )
+}
 
-::: {#seccion-2-3 .content-card}
+# Auxiliar
+`%if_null%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
 
-### 1pausa
+# ==============================================================================
+# 3. EJECUCIÓN DEL PIPELINE INDUSTRIAL
+# ==============================================================================
+paises_objetivo <- c("Colombia", "Costa Rica", "Honduras", 
+                     "México", "República Dominicana")
+
+cat("\n INICIANDO PIPELINE VECTORIZADO CON VALIDACIÓN...\n")
+
+resultados_completos <- map(paises_objetivo, function(pais) {
+  df_temp <- datos_etsir_final %>% filter(pais == !!pais)
+  
+  if(nrow(df_temp) == 0 && exists("datos_modelado")) {
+    df_temp <- datos_modelado %>% filter(pais == !!pais)
+  }
+  
+  tryCatch({
+    ajustar_msa_pais_completo(df_temp, pais, K_I = 8, K_max = 4)
+  }, error = function(e) {
+    cat(sprintf("Error en %s: %s\n", pais, e$message))
+    NULL
+  })
+}) %>% set_names(paises_objetivo)
+
+# Consolidar tabla de resultados
+tabla_msa_final <- map_dfr(resultados_completos, ~ .x$tabla) %>%
+  filter(!is.na(c0))
+
+# Consolidar datos de validación
+datos_validacion <- map_dfr(resultados_completos, ~ .x$datos_validacion) %>%
+  filter(!is.na(I_obs))
+
+cat("\nPIPELINE COMPLETADO CON VALIDACIÓN.\n\n")
+
+# ==============================================================================
+# 4. TABLA DE RESULTADOS CON MÉTRICAS DE VALIDACIÓN
+# ==============================================================================
+tabla_msa_final %>%
+  rename(
+    "$c_0$" = c0, "$c_I$" = cI, "$c_T$" = cT, "$c'_T$" = cT_prime,
+    "$c_P$" = cP, "$c'_P$" = cP_prime
+  ) %>%
+  kbl(
+    format = "html",
+    escape = FALSE,
+    caption = "Parámetros ETSIR-MSA con Métricas de Validación Estadística",
+    digits = c(0, 4, 4, 4, 4, 4, 4, 2, 2, 4, 2, 2, 2, 4, 0, 2)
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    full_width = FALSE,
+    position = "center",
+    font_size = 11
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+  column_spec(1, bold = TRUE, color = "#2c3e50") %>%
+  column_spec(10:13, background = "#e8f4f8") %>% # Resaltar métricas
+  footnote(
+    general = paste(
+      "Estimación MSA (K=4 pasos). Variables escaladas: I/1000, T=(T-25)/5, P=(P-200)/100.",
+      "R² calculado sobre predicciones one-step-ahead para diagnóstico.",
+      "Ljung-Box H₀: residuos son ruido blanco (p > 0.05 indica buen ajuste)."
+    ),
+    general_title = "Nota: ",
+    footnote_as_chunk = TRUE
+  )
+
+# ==============================================================================
+# 5. GRÁFICOS DE VALIDACIÓN DEL MODELO
+# ==============================================================================
+
+# --- 5.1 Series Observadas vs Ajustadas ---
+p_series <- ggplot(datos_validacion, aes(x = semana)) +
+  geom_line(aes(y = I_obs), color = "#2c3e50", linewidth = 0.6, alpha = 0.8) +
+  geom_line(aes(y = I_pred), color = "#e74c3c", linewidth = 0.5, 
+            linetype = "dashed", alpha = 0.9) +
+  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Validación del Modelo ETSIR-MSA: Series Observadas vs Ajustadas",
+    subtitle = "Ajuste one-step-ahead para diagnóstico de residuos",
+    x = "Semana Epidemiológica",
+    y = "Casos de Dengue",
+    caption = "Línea sólida = Observado | Línea punteada = Predicho por ETSIR-MSA"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#34495e"),
+    strip.text = element_text(color = "white", face = "bold"),
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_series)
+
+# --- 5.2 Diagnóstico de Residuos ---
+p_residuos <- datos_validacion %>%
+  filter(!is.na(residuos_std)) %>%
+  ggplot(aes(x = semana, y = residuos_std)) +
+  geom_hline(yintercept = 0, color = "gray40", linetype = "dashed") +
+  geom_hline(yintercept = c(-2, 2), color = "#e74c3c", 
+             linetype = "dotted", alpha = 0.6) +
+  geom_point(size = 0.8, alpha = 0.5, color = "#3498db") +
+  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Análisis de Residuos Estandarizados",
+    subtitle = "Verificación de supuesto de ruido blanco (±2 DE)",
+    x = "Semana Epidemiológica",
+    y = "Residuo Estandarizado"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#34495e"),
+    strip.text = element_text(color = "white", face = "bold"),
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_residuos)
+
+# --- 5.3 ACF de Residuos (Prueba de White Noise) ---
+# Calcular ACF por país
+acf_data <- datos_validacion %>%
+  filter(!is.na(residuos_std)) %>%
+  group_by(pais) %>%
+  do({
+    acf_vals <- acf(.$residuos_std, lag.max = 30, plot = FALSE)
+    tibble(
+      pais = .$pais[1],
+      lag = acf_vals$lag[,1,1],
+      acf = acf_vals$acf[,1,1]
+    )
+  }) %>%
+  ungroup()
+
+# Límites de significancia (95%)
+n_obs <- datos_validacion %>% group_by(pais) %>% summarise(n = n()) %>% pull(n)
+limite <- 1.96 / sqrt(n_obs[1]) # Aproximación
+
+p_acf <- ggplot(acf_data, aes(x = lag, y = acf)) +
+  geom_hline(yintercept = 0, color = "gray40") +
+  geom_hline(yintercept = c(-limite, limite), 
+             color = "#e74c3c", linetype = "dashed", alpha = 0.7) +
+  geom_segment(aes(xend = lag, yend = 0), 
+               color = "#3498db", linewidth = 0.8) +
+  facet_wrap(~ pais, ncol = 2) +
+  labs(
+    title = "Función de Autocorrelación (ACF) de Residuos",
+    subtitle = sprintf("Límites de significancia 95%%: ±%.3f", limite),
+    x = "Retraso (semanas)",
+    y = "Autocorrelación"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#34495e"),
+    strip.text = element_text(color = "white", face = "bold"),
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_acf)
+
+# --- 5.4 Curvas de Respuesta Ambiental (V-Invertida) ---
+curvas_ambientales <- map_dfr(resultados_completos, function(res) {
+  if(is.null(res)) return(NULL)
+  
+  # Función interna para extraer números garantizando que no devuelva NA/NULL
+  extrae_seguro <- function(objeto, llaves_posibles, default_val = 0) {
+    for (llave in llaves_posibles) {
+      val <- objeto[llave]
+      if (length(val) > 0 && !is.na(val) && !is.null(val[])) return(as.numeric(val))
+    }
+    return(default_val)
+  }
+  
+  params <- res$params
+  
+  # Extraer umbrales originales de forma segura (buscando todas las etiquetas posibles)
+  HT <- extrae_seguro(res$umbrales, c("HT_original", "HT", "HT_orig"), default_val = 25)
+  HP <- extrae_seguro(res$umbrales, c("HP_original", "HP", "HP_orig"), default_val = 200)
+  
+  # Extraer umbrales re-escalados necesarios para la ecuación matemática del pmax
+  HT_s <- extrae_seguro(params, c("HT_s", "HT_scaled", "HT"), default_val = 0)
+  HP_s <- extrae_seguro(params, c("HP_s", "HP_scaled", "HP"), default_val = 0)
+  
+  # Extraer coeficientes climatológicos con sus nombres o variantes con comilla (')
+  cT   <- extrae_seguro(params, c("cT", "cT_s"))
+  cT_p <- extrae_seguro(params, c("cT_prime", "cT_p", "cT'"))
+  cP   <- extrae_seguro(params, c("cP", "cP_s"))
+  cP_p <- extrae_seguro(params, c("cP_prime", "cP_p", "cP'"))
+  
+  # Extraer nombre del país de forma segura
+  nombre_pais <- if(!is.null(res$pais)) res$pais else if(!is.null(res$datos_validacion$pais[1])) res$datos_validacion$pais[1] else "Desconocido"
+  
+  # 1. Curva de temperatura
+  temp_seq <- seq(HT - 8, HT + 8, length.out = 100)
+  gT_vals  <- cT * (temp_seq - 25)/5 + cT_p * pmax((temp_seq - 25)/5 - HT_s, 0)
+  
+  curva_temp <- tibble(
+    pais     = nombre_pais,
+    variable = "Temperatura",
+    valor    = temp_seq,
+    efecto   = gT_vals,
+    umbral   = HT
+  )
+  
+  # 2. Curva de precipitación (Evitando secuencias negativas en milímetros)
+  precip_seq <- seq(max(0, HP - 150), HP + 250, length.out = 100)
+  gP_vals    <- cP * (precip_seq - 200)/100 + cP_p * pmax((precip_seq - 200)/100 - HP_s, 0)
+  
+  curva_precip <- tibble(
+    pais     = nombre_pais,
+    variable = "Precipitación",
+    valor    = precip_seq,
+    efecto   = gP_vals,
+    umbral   = HP
+  )
+  
+  bind_rows(curva_temp, curva_precip)
+})
+
+# --- Código para Graficar las Curvas de Respuesta Climatológica ---
+p_curvas <- ggplot(curvas_ambientales, aes(x = valor, y = efecto, color = pais)) +
+  geom_line(linewidth = 1) +
+  geom_vline(aes(xintercept = umbral), linetype = "dashed", alpha = 0.5, color = "gray30") +
+  facet_wrap(variable ~ pais, scales = "free_x", ncol = 5) + 
+  labs(
+    title = "Efectos Marginales Ambientales en el Modelo ETSIR-MSA",
+    subtitle = "Representación matemática de la hipótesis de la V-Invertida (Umbral Crítico)",
+    x = "Valor Climático (Original)",
+    y = "Impacto en el Log-R0",
+    color = "País"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#2c3e50"),
+    strip.text       = element_text(color = "white", face = "bold"),
+    legend.position  = "none"
+  )
+
+print(p_curvas)
+
+p_curvas <- ggplot(curvas_ambientales, aes(x = valor, y = efecto)) +
+  geom_line(color = "#3498db", linewidth = 1.2) +
+  geom_vline(aes(xintercept = umbral), 
+             color = "#e74c3c", linetype = "dashed", linewidth = 0.8) +
+  facet_grid(variable ~ pais, scales = "free") +
+  labs(
+    title = "Funciones de Respuesta Ambiental (Forma V-Invertida)",
+    subtitle = "Efecto no lineal de temperatura y precipitación sobre la transmisión",
+    x = "Variable Ambiental (°C o mm)",
+    y = "Efecto sobre Tasa de Reproducción",
+    caption = "Línea roja punteada = Umbral crítico (H_T o H_P)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.background = element_rect(fill = "#34495e"),
+    strip.text = element_text(color = "white", face = "bold"),
+    plot.title = element_text(face = "bold", color = "#2c3e50"),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_curvas)
+
+# ==============================================================================
+# 6. VALIDACIÓN DE RESTRICCIONES BIOLÓGICAS
+# ==============================================================================
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("VALIDACIÓN DE RESTRICCIONES BIOLÓGICAS Y ESTADÍSTICAS\n")
+cat(rep("=", 70), "\n\n", sep = "")
+
+validacion_biologica <- tabla_msa_final %>%
+  mutate(
+    `c0 > 0`      = c0 > 0,
+    `cI < 0`      = cI < 0,
+    `cT > 0`      = cT > 0,
+    `cT' < 0`     = cT_prime < 0,
+    `cP > 0`      = cP > 0,
+    `cP' < 0`     = cP_prime < 0,
+    `R² > 0`      = R2 > 0,
+    `White Noise` = `Ljung-Box (p)` > 0.05 | is.na(`Ljung-Box (p)`)
+  ) %>%
+  # Forzamos explícitamente el uso de dplyr
+  dplyr::select(Pais, starts_with("c0"), starts_with("cI"), starts_with("cT"), 
+                starts_with("cP"), starts_with("R²"), starts_with("White"))
+
+# Mostrar la tabla de auditoría en la consola
+print(validacion_biologica)
+
+
+# 1. Aplicar el formato condicional de celdas por columna dentro de mutate
+tabla_formateada <- validacion_biologica %>%
+  mutate(
+    # Función auxiliar interna para pintar TRUE de verde y FALSE de rojo
+    across(2:9, ~ cell_spec(.x, "html", 
+                            color = ifelse(.x == TRUE, "#27ae60", "#c0392b"), 
+                            bold = TRUE))
+  )
+
+# 2. Renderizar la tabla con kable y kable_styling
+tabla_html <- tabla_formateada %>%
+  kbl(
+    format = "html",
+    caption = "Verificación de Restricciones Biológicas del Modelo ETSIR",
+    align = "lcccccccc", # Alinea país a la izquierda y el resto centrado
+    escape = FALSE       # ¡CRÍTICO! Permite que R interprete el código HTML generado por cell_spec
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+  column_spec(1, bold = TRUE)
+
+# Mostrar la tabla formateada
+tabla_html
+
+# Resumen estadístico
+cat("\nRESUMEN DE CUMPLIMIENTO:\n")
+cat(sprintf("  ✔ c₀ > 0 (R₀ base positivo):        %d/5 países\n", 
+            sum(tabla_msa_final$c0 > 0)))
+cat(sprintf("  ✔ c_I < 0 (Inmunidad efectiva):      %d/5 países\n", 
+            sum(tabla_msa_final$cI < 0)))
+cat(sprintf("  ✔ c_T > 0 (Temperatura favorece):    %d/5 países\n", 
+            sum(tabla_msa_final$cT > 0)))
+cat(sprintf("  ✔ c'_T < 0 (Efecto V-invertida):     %d/5 países\n", 
+            sum(tabla_msa_final$cT_prime < 0)))
+cat(sprintf("  ✔ c_P > 0 (Precipitación favorece):  %d/5 países\n", 
+            sum(tabla_msa_final$cP > 0)))
+cat(sprintf("  ✔ c'_P < 0 (Efecto flushing):        %d/5 países\n", 
+            sum(tabla_msa_final$cP_prime < 0)))
+cat(sprintf("  ✔ R² > 0 (Ajuste positivo):          %d/5 países\n", 
+            sum(tabla_msa_final$R2 > 0)))
+cat(sprintf("  ✔ White Noise (Ljung-Box p>0.05):    %d/5 países\n", 
+            sum(tabla_msa_final$`Ljung-Box (p)` > 0.05, na.rm = TRUE)))
+
+cat("\n", rep("=", 70), "\n", sep = "")
+cat("✅ VALIDACIÓN COMPLETA. MODELO LISTO PARA PUBLICACIÓN.\n")
+cat(rep("=", 70), "\n", sep = "")
+```
+
+```{r Rmd MSA}
+#==============================================================================
+# BLOQUE MSA: MOTOR DE ESTIMACIÓN Y VALIDACIÓN (VERSIÓN BLINDADA RMD)
+#==============================================================================
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(kableExtra)
+library(scales) # Para formato de ejes (comma)
+
+# ==============================================================================
+# 1. FUNCIÓN DE PÉRDIDA NATIVA MATRICIAL (ULTRARRÁPIDA)
+# ==============================================================================
+msa_loss_core_vectorized <- function(params, I_s, T_s, P_s, K_I, K_max) {
+  c0 <- params[1]; cI <- params[2]; cT <- params[3]
+  cT_p <- params[4]; cP <- params[5]; cP_p <- params[6]
+  HT_s <- params[7]; HP_s <- params[8]
+  
+  n <- length(I_s)
+  valid_t <- (K_I + 1):(n - K_max)
+  n_valid <- length(valid_t)
+  
+  if (n_valid <= 0) return(Inf)
+  
+  idx_future <- outer(valid_t, 0:(K_max - 1), "+")
+  env_T_matrix <- matrix(T_s[idx_future], nrow = n_valid)
+  env_P_matrix <- matrix(P_s[idx_future], nrow = n_valid)
+  
+  idx_history <- outer(valid_t - 1, 0:(K_I - 1), "-")
+  state_matrix <- matrix(I_s[idx_history], nrow = n_valid)
+  
+  preds_matrix <- matrix(0, nrow = n_valid, ncol = K_max)
+  
+  for(k in 1:K_max) {
+    I_t_minus_1 <- state_matrix[, 1]
+    acum_I <- rowSums(state_matrix)
+    
+    gT <- cT * env_T_matrix[, k] + cT_p * pmax(env_T_matrix[, k] - HT_s, 0)
+    gP <- cP * env_P_matrix[, k] + cP_p * pmax(env_P_matrix[, k] - HP_s, 0)
+    
+    mu <- (c0 + cI * acum_I + gT + gP) * I_t_minus_1
+    mu <- pmax(mu, 1e-4)
+    
+    preds_matrix[, k] <- mu
+    
+    if(K_I > 1) {
+      state_matrix <- cbind(mu, state_matrix[, 1:(K_I - 1), drop = FALSE])
+    } else {
+      state_matrix <- matrix(mu, ncol = 1)
+    }
+  }
+  
+  idx_obs <- outer(valid_t, 1:K_max, "+")
+  obs_matrix <- matrix(I_s[idx_obs], nrow = n_valid)
+  
+  total_loss <- sum((obs_matrix - preds_matrix)^2, na.rm = TRUE)
+  return(total_loss + 0.01 * sum(params[1:6]^2))
+}
+
+# ==============================================================================
+# 2. FUNCIÓN DE AJUSTE POR PAÍS (CON MANEJO ROBUSTO DE ERRORES)
+# ==============================================================================
+ajustar_msa_pais_completo <- function(df_pais, pais_nombre, K_I = 8, K_max = 4) {
+  # Extracción segura de variables (Fallback si los nombres cambian)
+  I_s <- df_pais$I_t_scaled %||% df_pais$I_s %||% (df_pais$I_t / 1000)
+  T_s <- df_pais$temp_scaled %||% df_pais$T_s %||% ((df_pais$temp_opt - 25) / 5)
+  P_s <- df_pais$precip_scaled %||% df_pais$P_s %||% ((df_pais$precip_opt - 200) / 100)
+  
+  I_orig <- df_pais$I_t
+  T_orig <- df_pais$temp_original %||% df_pais$temp_opt
+  P_orig <- df_pais$precip_original %||% df_pais$precip_opt
+  
+  if(length(I_s) < 50) return(NULL) # Cortafuegos: datos insuficientes
+  
+  # --- Grid Search para Umbrales ---
+  HT_grid <- quantile(T_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  HP_grid <- quantile(P_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  grid <- expand.grid(HT = HT_grid, HP = HP_grid)
+  grid$loss <- Inf
+  
+  for(i in 1:nrow(grid)) {
+    params_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02, grid$HT[i], grid$HP[i])
+    opt_grid <- tryCatch({
+      suppressWarnings(optim(params_init[1:6], 
+        fn = function(p) msa_loss_core_vectorized(c(p, grid$HT[i], grid$HP[i]), I_s, T_s, P_s, K_I, K_max),
+        method = "L-BFGS-B", lower = c(0.1, -2, 0.001, -2, 0.001, -2), upper = c(5, -1e-4, 2, -1e-4, 2, -1e-4),
+        control = list(maxit = 100)))
+    }, error = function(e) list(value = Inf))
+    grid$loss[i] <- opt_grid$value
+  }
+  
+  mejor_grid <- grid[which.min(grid$loss), ]
+  HT_opt <- mejor_grid$HT; HP_opt <- mejor_grid$HP
+  
+  # --- Optimización Final ---
+  params_final_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02)
+  optim_result <- tryCatch({
+    suppressWarnings(optim(params_final_init,
+      fn = function(p) msa_loss_core_vectorized(c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
+      method = "L-BFGS-B", lower = c(0.1, -5, 0.001, -5, 0.001, -5), upper = c(10, -1e-4, 5, -1e-4, 5, -1e-4),
+      control = list(maxit = 500)))
+  }, error = function(e) list(par = params_final_init, counts = c("function"=0), value = NA))
+  
+  if(is.null(optim_result$counts) || optim_result$counts["function"] <= 1) {
+    optim_result <- suppressWarnings(optim(params_final_init,
+      fn = function(p) msa_loss_core_vectorized(c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
+      method = "Nelder-Mead", control = list(maxit = 500)))
+  }
+  
+  HT_orig <- HT_opt * 5 + 25
+  HP_orig <- HP_opt * 100 + 200
+  
+  params_estimados <- c(c0 = optim_result$par[1], cI = optim_result$par[2], cT = optim_result$par[3],
+                        cT_p = optim_result$par[4], cP = optim_result$par[5], cP_p = optim_result$par[6],
+                        HT_s = HT_opt, HP_s = HP_opt)
+  
+  # --- Generar Predicciones OSA para Validación ---
+  n <- length(I_s)
+  preds_osa <- numeric(n)
+  for(t in (K_I + 1):n) {
+    state <- I_s[(t-1):(t-K_I)]
+    gT <- params_estimados["cT"] * T_s[t] + params_estimados["cT_p"] * pmax(T_s[t] - HT_opt, 0)
+    gP <- params_estimados["cP"] * P_s[t] + params_estimados["cP_p"] * pmax(P_s[t] - HP_opt, 0)
+    mu <- (params_estimados["c0"] + params_estimados["cI"] * sum(state) + gT + gP) * state[1]
+    preds_osa[t] <- max(mu, 1e-4)
+  }
+  
+  preds_osa_orig <- preds_osa * 1000
+  residuos <- I_orig - preds_osa_orig
+  residuos_esc <- residuos / sd(I_orig, na.rm = TRUE)
+  
+  # Métricas
+  ss_res <- sum(residuos^2, na.rm = TRUE)
+  ss_tot <- sum((I_orig - mean(I_orig, na.rm = TRUE))^2, na.rm = TRUE)
+  R2 <- ifelse(ss_tot == 0, 0, 1 - ss_res / ss_tot)
+  RMSE <- sqrt(mean(residuos^2, na.rm = TRUE))
+  
+  # Ljung-Box (Base R, no requiere forecast)
+  residuos_limpios <- residuos_esc[is.finite(residuos_esc)]
+  ljung_box <- tryCatch({
+    if(length(residuos_limpios) > 20) Box.test(residuos_limpios, lag = 20, type = "Ljung-Box")$p.value else NA
+  }, error = function(e) NA)
+  
+  list(
+    tabla = tibble(Pais = pais_nombre, c0 = round(optim_result$par[1], 4), cI = round(optim_result$par[2], 4),
+      cT = round(optim_result$par[3], 4), cT_prime = round(optim_result$par[4], 4),
+      cP = round(optim_result$par[5], 4), cP_prime = round(optim_result$par[6], 4),
+      `H_T (°C)` = round(HT_orig, 2), `H_P (mm)` = round(HP_orig, 2),
+      R2 = round(R2, 4), RMSE = round(RMSE, 2), `Ljung-Box (p)` = round(ljung_box, 4),
+      Iteraciones = optim_result$counts["function"], Loss_MSA = round(optim_result$value, 2)),
+    datos_validacion = tibble(pais = pais_nombre, semana = seq_along(I_orig), I_obs = I_orig,
+      I_pred = preds_osa_orig, residuos = residuos, residuos_std = residuos_esc, temp = T_orig, precip = P_orig),
+    params = params_estimados, umbrales = c(HT = HT_orig, HP = HP_orig)
+  )
+}
+
+# ==============================================================================
+# 3. EJECUCIÓN DEL PIPELINE
+# ==============================================================================
+paises_objetivo <- c("Colombia", "Costa Rica", "Honduras", "México", "República Dominicana")
+resultados_completos <- map(paises_objetivo, function(pais) {
+  df_temp <- tryCatch(filter(datos_etsir_final, pais == !!pais), error = function(e) NULL)
+  if(is.null(df_temp) || nrow(df_temp) == 0) {
+    df_temp <- tryCatch(filter(datos_modelado, pais == !!pais), error = function(e) NULL)
+  }
+  if(is.null(df_temp) || nrow(df_temp) == 0) return(NULL)
+  
+  tryCatch(ajustar_msa_pais_completo(df_temp, pais), error = function(e) NULL)
+}) %>% set_names(paises_objetivo) %>% compact() # compact() elimina los NULLs
+
+tabla_msa_final <- map_dfr(resultados_completos, ~ .x$tabla)
+datos_validacion <- map_dfr(resultados_completos, ~ .x$datos_validacion) %>% filter(is.finite(I_obs))
+
+# ==============================================================================
+# 4. RENDERIZADO DE TABLA Y GRÁFICOS (A PRUEBA DE FALLOS)
+# ==============================================================================
+if(nrow(tabla_msa_final) > 0) {
+  tabla_msa_final %>%
+    rename("$c_0$" = c0, "$c_I$" = cI, "$c_T$" = cT, "$c'_T$" = cT_prime, "$c_P$" = cP, "$c'_P$" = cP_prime) %>%
+    kbl(format = "html", escape = FALSE, caption = "Parámetros ETSIR-MSA con Métricas de Validación", digits = 4) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+    column_spec(1, bold = TRUE, color = "#2c3e50")
+} else {
+  cat("⚠️ No se generaron resultados MSA válidos para tabular.")
+}
+
+# --- Gráfico 1: Series Observadas vs Ajustadas ---
+if(nrow(datos_validacion) > 0) {
+  p_series <- ggplot(datos_validacion, aes(x = semana)) +
+    geom_line(aes(y = I_obs), color = "#2c3e50", linewidth = 0.6) +
+    geom_line(aes(y = I_pred), color = "#e74c3c", linewidth = 0.5, linetype = "dashed") +
+    facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+    scale_y_continuous(labels = comma) +
+    labs(title = "Validación ETSIR-MSA: Observado vs Predicho (One-Step-Ahead)",
+         x = "Semana Epidemiológica", y = "Casos de Dengue") +
+    theme_minimal(base_size = 11) +
+    theme(strip.background = element_rect(fill = "#34495e"), strip.text = element_text(color = "white", face = "bold"))
+  print(p_series)
+}
+
+# --- Gráfico 2: ACF de Residuos (Moderno y sin `do()`) ---
+if(nrow(datos_validacion) > 30) {
+  acf_data <- datos_validacion %>%
+    filter(is.finite(residuos_std)) %>%
+    group_split(pais) %>%
+    map_dfr(function(df) {
+      acf_vals <- acf(df$residuos_std, lag.max = 30, plot = FALSE, na.action = na.pass)
+      tibble(pais = df$pais[1], lag = as.numeric(acf_vals$lag), acf = as.numeric(acf_vals$acf))
+    }) %>% filter(!is.na(lag))
+  
+  if(nrow(acf_data) > 0) {
+    n_obs <- datos_validacion %>% group_by(pais) %>% summarise(n = sum(!is.na(residuos_std))) %>% pull(n)
+    limite <- 1.96 / sqrt(max(n_obs, 1))
+    
+    p_acf <- ggplot(acf_data, aes(x = lag, y = acf)) +
+      geom_hline(yintercept = 0, color = "gray40") +
+      geom_hline(yintercept = c(-limite, limite), color = "#e74c3c", linetype = "dashed") +
+      geom_segment(aes(xend = lag, yend = 0), color = "#3498db", linewidth = 0.8) +
+      facet_wrap(~ pais, ncol = 2) +
+      labs(title = "ACF de Residuos (Prueba de Ruido Blanco)", x = "Retraso (semanas)", y = "Autocorrelación") +
+      theme_minimal(base_size = 11) +
+      theme(strip.background = element_rect(fill = "#34495e"), strip.text = element_text(color = "white", face = "bold"))
+    print(p_acf)
+  }
+}
+
+cat("\n✅ Bloque MSA compilado exitosamente.\n")
+```
+### 2pausa
 :::

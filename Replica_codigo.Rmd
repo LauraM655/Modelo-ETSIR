@@ -8,9 +8,9 @@ output:
     self_contained: true
     code_folding: hide
     mathjax: default
-    css: estilos.css         # 👈 Vincula el CSS externo automáticamente
+    css: estilos.css         #  Vincula el CSS externo automáticamente
     includes:
-      in_header: scripts.js # 👈 Vincula el JS externo en el header
+      in_header: scripts.js #  Vincula el JS externo en el header
 editor_options: 
   markdown: 
     wrap: sentence
@@ -27,7 +27,7 @@ editor_options:
 ```{r setup-global, include=FALSE}
 knitr::opts_chunk$set(
   echo       = TRUE,
-  warning    = FALSE,
+  warning    = TRUE,
   message    = FALSE,
   fig.width  = 11,
   fig.height = 10,
@@ -40,17 +40,14 @@ knitr::opts_chunk$set(
 
 ## Módulo I: Base de datos
 
-
-
-
 ```{r ModuloI, child='ModuloI.Rmd'}
-# 👈 Este bloque mágico inserta todo el contenido del Capítulo 1 aquí
+#  Este bloque mágico inserta todo el contenido  aquí
 ```
 
 ## Módulo II: replica modelo ETSIR
 
 ```{r ModuloII, child='ModuloII.Rmd'}
-# 👈 Este bloque mágico inserta todo el contenido del Capítulo 1 aquí
+#  Este bloque mágico inserta todo el contenido  aquí
 ```
 
 

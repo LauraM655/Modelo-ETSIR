@@ -55,7 +55,7 @@ Esto permite detectar conflictos de versiones antes de ejecutar el pipeline comp
 paquetes_necesarios <- c(
   "readr", "dplyr", "tidyr", "purrr", "lubridate",
   "MMWRweek", "zoo", "ggplot2", "scales", "kableExtra",
-  "nasapower", "MASS"
+  "nasapower", "MASS", "pscl", "mgcv", "purrr", "forecast", "patchwork", "scales"
 )
 
 for (pkg in paquetes_necesarios) {
