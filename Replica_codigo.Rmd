@@ -27,7 +27,7 @@ editor_options:
 ```{r setup-global, include=FALSE}
 knitr::opts_chunk$set(
   echo       = TRUE,
-  warning    = TRUE,
+  warning    = FALSE,
   message    = FALSE,
   fig.width  = 11,
   fig.height = 10,
@@ -49,5 +49,7 @@ knitr::opts_chunk$set(
 ```{r ModuloII, child='ModuloII.Rmd'}
 #  Este bloque mágico inserta todo el contenido  aquí
 ```
+
+
 
 
