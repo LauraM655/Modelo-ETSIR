@@ -45,7 +45,7 @@ Este módulo construye la base de datos (`datos_master`) que alimenta el modelo 
 paquetes_necesarios <- c(
   "readr", "dplyr", "tidyr", "purrr", "lubridate",
   "MMWRweek", "zoo", "ggplot2", "scales", "kableExtra",
-  "nasapower", "MASS", "pscl", "mgcv", "purrr", "forecast", "patchwork"
+  "nasapower", "MASS", "pscl", "mgcv", "forecast", "patchwork"
 )
 
 for (pkg in paquetes_necesarios) {

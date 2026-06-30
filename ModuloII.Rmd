@@ -145,14 +145,6 @@ $$\boldsymbol{\theta} = (c_0,\, c_I,\, c_P,\, c_P',\, c_T,\, c_T',\, H_P,\, H_T,
 # evita horas de cómputo perdido.
 #==============================================================================
 
-# --- 1.1 Cargar librerías específicas del modelado ---
-library(MASS)       # glm.nb (Binomial Negativa)
-library(dplyr)
-library(purrr)
-library(ggplot2)
-library(kableExtra)
-library(scales)
-
 cat("═══════════════════════════════════════════════════════\n")
 cat("PREPARACIÓN DE DATOS PARA MODELADO ETSIR\n")
 cat("═══════════════════════════════════════════════════════\n\n")
@@ -612,14 +604,16 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
 }
 
 cat("✔ Función ajustar_etsir_osa() definida correctamente.\n")
+
 ```
 
 #### 3.2 Ejecución del Ajuste OSA
 
-```{r bloque-3-ejecucion-osa}
+```{r bloque-3-ejecucion-osa, warning=FALSE}
 #==============================================================================
 # BLOQUE 3.2: EJECUCIÓN DEL AJUSTE OSA PARA LOS 5 PAÍSES
 #==============================================================================
+
 
 # Ajustar por país
 resultados_etsir_osa <- datos_modelado %>%
@@ -667,7 +661,7 @@ tabla_metricas_osa %>%
 
 #### 4.1 Series Observadas vs. Predichas
 
-```{r bloque-4-diagnostico-series, fig.height=8, fig.width=10}
+```{r bloque-4-diagnostico-series}
 #==============================================================================
 # BLOQUE 4.1: DIAGNÓSTICO VISUAL - SERIES OBSERVADAS VS. PREDICHAS
 #==============================================================================
@@ -1103,6 +1097,368 @@ ajustar_msa_distribucion <- function(df_pais, pais_nombre, distribucion,
     ),
     params = params_estimados,
     umbrales = c(HT = HT_orig, HP = HP_orig)
+  )
+}
+
+ajustar_msa_distribucion <- function(df_pais, pais_nombre, distribucion,
+                                      K_I = 8, K_max = 4,
+                                      timeout_sec = 300,      # tiempo máximo
+                                      show_progress = TRUE) { # barra de progreso
+  
+  # Si se pide timeout, usar withTimeout
+  if (requireNamespace("R.utils", quietly = TRUE)) {
+    return(R.utils::withTimeout({
+      .ajustar_msa_dist_interno(df_pais, pais_nombre, distribucion,
+                                 K_I, K_max, show_progress)
+    }, timeout = timeout_sec, onTimeout = "error"))
+  } else {
+    warning("Paquete R.utils no instalado. No se aplicará timeout.")
+    return(.ajustar_msa_dist_interno(df_pais, pais_nombre, distribucion,
+                                      K_I, K_max, show_progress))
+  }
+}
+
+# Función interna (sin timeout) que hace el trabajo real
+.ajustar_msa_dist_interno <- function(df_pais, pais_nombre, distribucion,
+                                       K_I, K_max, show_progress) {
+  
+  cat(sprintf("\n─────────────────────────────────────────────────────\n"))
+  cat(sprintf("  Procesando MSA para: %s (%s)\n", pais_nombre, distribucion))
+  cat(sprintf("─────────────────────────────────────────────────────\n"))
+  
+  # --- Estandarización dinámica por país ---
+  cat("  [0/5] Estandarizando variables...\n")
+  
+  temp_mu   <- mean(df_pais$temp_opt, na.rm = TRUE)
+  temp_sd   <- sd(df_pais$temp_opt, na.rm = TRUE)
+  precip_mu <- mean(df_pais$precip_opt, na.rm = TRUE)
+  precip_sd <- sd(df_pais$precip_opt, na.rm = TRUE)
+  I_mu      <- mean(df_pais$I_t, na.rm = TRUE)
+  I_sd      <- sd(df_pais$I_t, na.rm = TRUE)
+  
+  temp_sd   <- ifelse(temp_sd == 0 || is.na(temp_sd), 1, temp_sd)
+  precip_sd <- ifelse(precip_sd == 0 || is.na(precip_sd), 1, precip_sd)
+  I_sd      <- ifelse(I_sd == 0 || is.na(I_sd), 1, I_sd)
+  
+  I_s     <- (df_pais$I_t - 0) / I_sd
+  T_s     <- (df_pais$temp_opt - temp_mu) / temp_sd
+  P_s     <- (df_pais$precip_opt - precip_mu) / precip_sd
+  I_orig  <- df_pais$I_t
+  
+  n <- length(I_s)
+  if (n < 50) {
+    warning("Datos insuficientes para ", pais_nombre, " (", n, " obs)")
+    return(NULL)
+  }
+  
+  cat("    ✔", n, "observaciones | I_sd =", round(I_sd, 2), 
+      "| temp_sd =", round(temp_sd, 2), "| precip_sd =", round(precip_sd, 2), "\n")
+  
+  n_params_estructurales <- 6
+  n_params_dist <- if (distribucion == "nbinom") 1 else 0
+  
+  # --- Grid search de umbrales (más reducido) ---
+  cat("  [1/5] Grid search de umbrales (5x5)...\n")
+  
+  HT_grid <- quantile(T_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  HP_grid <- quantile(P_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  grid <- expand.grid(HT = HT_grid, HP = HP_grid)
+  n_grid <- nrow(grid)
+  grid$nll <- Inf
+  grid$convergio <- FALSE
+  
+  cat("    Grid:", n_grid, "combinaciones\n")
+  
+  # Parámetros base para inicialización
+  params_init_base <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02)
+  if (distribucion == "nbinom") params_init_base <- c(params_init_base, log(2))
+  
+  # --- Configuración de multistart (más rápido) ---
+  cat("  [2/5] Configurando optimización multistart (rápida)...\n")
+  
+  N_STARTS <- 4L          # reducido de 8 a 4
+  N_STARTS_GRID <- 2L     # reducido de 3 a 2
+  
+  lower_b <- c(0.05, -3, 0.0001, -10, 0.0001, -10)
+  upper_b <- c(8.0, -1e-5, 3.0, -1e-5, 3.0, -1e-5)
+  if (distribucion == "nbinom") {
+    lower_b <- c(lower_b, log(0.02))
+    upper_b <- c(upper_b, log(200))
+  }
+  
+  construir_params <- function(p, HT, HP) {
+    if (distribucion == "nbinom") c(p[1:6], HT, HP, p[7]) else c(p[1:6], HT, HP)
+  }
+  
+  generar_puntos_init <- function(n_starts, semilla = 123) {
+    set.seed(semilla)
+    puntos <- list(params_init_base)
+    for (i in seq_len(n_starts - 1)) {
+      p_rand <- c(
+        runif(1, 0.2, 4.5),
+        runif(1, -1.8, -0.0005),
+        runif(1, 0.0005, 1.8),
+        runif(1, -1.8, -0.0005),
+        runif(1, 0.0005, 1.8),
+        runif(1, -1.8, -0.0005)
+      )
+      if (distribucion == "nbinom") {
+        p_rand <- c(p_rand, runif(1, log(0.1), log(50)))
+      }
+      puntos[[length(puntos) + 1]] <- p_rand
+    }
+    puntos
+  }
+  
+  optimizar_multistart <- function(fn_obj, puntos_init, lower_b, upper_b,
+                                   maxit_grid = 300, maxit_final = 800) {
+    mejor_resultado <- NULL
+    mejor_valor <- Inf
+    for (p0 in puntos_init) {
+      res <- tryCatch({
+        suppressWarnings(optim(
+          par = p0, fn = fn_obj,
+          method = "L-BFGS-B", lower = lower_b, upper = upper_b,
+          control = list(maxit = maxit_grid)
+        ))
+      }, error = function(e) list(value = Inf))
+      
+      if (is.finite(res$value) && res$value < mejor_valor) {
+        mejor_valor <- res$value
+        mejor_resultado <- res
+      }
+    }
+    # Si todos fallan, intentar con Nelder-Mead (más robusto pero lento)
+    if (is.null(mejor_resultado)) {
+      mejor_resultado <- suppressWarnings(optim(
+        par = puntos_init[[1]], fn = fn_obj,
+        method = "Nelder-Mead", control = list(maxit = maxit_final)
+      ))
+    }
+    mejor_resultado
+  }
+  
+  puntos_init_grid  <- generar_puntos_init(N_STARTS_GRID, semilla = 123)
+  puntos_init_final <- generar_puntos_init(N_STARTS, semilla = 123)
+  
+  # --- Grid de umbrales con multistart liviano ---
+  cat("  [3/5] Ejecutando grid search (", n_grid, " combinaciones)...\n")
+  
+  if (show_progress) {
+    pb <- txtProgressBar(min = 0, max = n_grid, style = 3)
+  }
+  
+  n_convergio <- 0
+  n_fallos <- 0
+  
+  for (i in seq_len(n_grid)) {
+    HT_cand <- grid$HT[i]
+    HP_cand <- grid$HP[i]
+    
+    fn_grid <- function(p) {
+      msa_negloglik_core(
+        construir_params(p, HT_cand, HP_cand),
+        I_s = I_s, I_orig = I_orig, T_s = T_s, P_s = P_s,
+        K_I = K_I, K_max = K_max, distribucion = distribucion,
+        escala_I = I_sd
+      )
+    }
+    
+    opt_grid <- tryCatch({
+      optimizar_multistart(fn_grid, puntos_init_grid, lower_b, upper_b,
+                           maxit_grid = 300, maxit_final = 600)
+    }, error = function(e) list(value = Inf))
+    
+    if (is.finite(opt_grid$value) && opt_grid$value < 1e9) {
+      grid$nll[i] <- opt_grid$value
+      grid$convergio[i] <- TRUE
+      n_convergio <- n_convergio + 1
+    } else {
+      n_fallos <- n_fallos + 1
+    }
+    
+    if (show_progress) setTxtProgressBar(pb, i)
+  }
+  
+  if (show_progress) close(pb)
+  
+  cat("    ✔ Convergidos:", n_convergio, "/", n_grid, " | Fallos:", n_fallos, "\n")
+  
+  # Si ningún punto del grid convergió, intentar con un grid más grueso
+  if (n_convergio == 0) {
+    warning("Ninguna combinación del grid convergió para ", pais_nombre, 
+            " (", distribucion, "). Intentando con grid reducido...")
+    HT_grid2 <- quantile(T_s, probs = c(0.25, 0.50, 0.75), na.rm = TRUE)
+    HP_grid2 <- quantile(P_s, probs = c(0.25, 0.50, 0.75), na.rm = TRUE)
+    grid2 <- expand.grid(HT = HT_grid2, HP = HP_grid2)
+    grid2$nll <- Inf
+    grid2$convergio <- FALSE
+    
+    for (i in seq_len(nrow(grid2))) {
+      HT_cand <- grid2$HT[i]
+      HP_cand <- grid2$HP[i]
+      fn_grid2 <- function(p) {
+        msa_negloglik_core(
+          construir_params(p, HT_cand, HP_cand),
+          I_s = I_s, I_orig = I_orig, T_s = T_s, P_s = P_s,
+          K_I = K_I, K_max = K_max, distribucion = distribucion,
+          escala_I = I_sd
+        )
+      }
+      opt_grid2 <- tryCatch({
+        optimizar_multistart(fn_grid2, puntos_init_grid, lower_b, upper_b,
+                             maxit_grid = 300, maxit_final = 600)
+      }, error = function(e) list(value = Inf))
+      if (is.finite(opt_grid2$value) && opt_grid2$value < 1e9) {
+        grid2$nll[i] <- opt_grid2$value
+        grid2$convergio[i] <- TRUE
+        n_convergio <- n_convergio + 1
+      }
+    }
+    
+    if (n_convergio == 0) {
+      warning("No convergió ningún modelo para ", pais_nombre, " (", distribucion, ")")
+      return(NULL)
+    }
+    grid <- grid2
+  }
+  
+  mejor_grid <- grid[which.min(grid$nll), ]
+  HT_opt <- mejor_grid$HT
+  HP_opt <- mejor_grid$HP
+  
+  cat("    ✔ Mejores umbrales (z): H_T =", round(HT_opt, 3), 
+      "| H_P =", round(HP_opt, 3), "\n")
+  
+  # --- Optimización final con multistart completo ---
+  cat("  [4/5] Optimización final (multistart)...\n")
+  
+  fn_final <- function(p) {
+    msa_negloglik_core(
+      construir_params(p, HT_opt, HP_opt),
+      I_s = I_s, I_orig = I_orig, T_s = T_s, P_s = P_s,
+      K_I = K_I, K_max = K_max, distribucion = distribucion,
+      escala_I = I_sd
+    )
+  }
+  
+  optim_result <- tryCatch({
+    optimizar_multistart(fn_final, puntos_init_final, lower_b, upper_b,
+                         maxit_grid = 500, maxit_final = 1000)
+  }, error = function(e) {
+    cat("    ⚠ Error en optimización final:", e$message, "\n")
+    list(value = Inf, par = rep(NA, length(lower_b)))
+  })
+  
+  if (!is.finite(optim_result$value) || optim_result$value > 1e9) {
+    warning("Optimización final falló para ", pais_nombre, " (", distribucion, ")")
+    return(NULL)
+  }
+  
+  # Diagnóstico de límites
+  par_chequeo <- optim_result$par[1:6]
+  en_limite <- abs(par_chequeo - lower_b[1:6]) < 1e-4 | abs(par_chequeo - upper_b[1:6]) < 1e-4
+  if (any(en_limite)) {
+    nombres_par <- c("c0", "cI", "cT", "cT'", "cP", "cP'")
+    cat("    ⚠ Parámetro(s)", paste(nombres_par[en_limite], collapse = ", "),
+        "en límite de caja\n")
+  }
+  
+  # Des-escalado de umbrales
+  HT_orig <- HT_opt * temp_sd + temp_mu
+  HP_orig <- HP_opt * precip_sd + precip_mu
+  
+  par_final <- optim_result$par
+  theta_final <- if (distribucion == "nbinom") exp(par_final[7]) else NA
+  
+  params_estimados <- c(
+    c0 = par_final[1], cI = par_final[2], cT = par_final[3],
+    cT_p = par_final[4], cP = par_final[5], cP_p = par_final[6],
+    HT_s = HT_opt, HP_s = HP_opt,
+    theta = theta_final
+  )
+  
+  cat("    ✔ Umbrales originales: H_T =", round(HT_orig, 2), "°C | H_P =", 
+      round(HP_orig, 2), "mm\n")
+  cat("    ✔ Iteraciones:", optim_result$counts["function"], "\n")
+  
+  # --- Predicciones multi-paso para diagnóstico ---
+  cat("  [5/5] Calculando predicciones y métricas...\n")
+  
+  preds_1paso <- rep(NA_real_, n)
+  
+  for (t in (K_I + 1):n) {
+    state <- I_s[(t - 1):(t - K_I)]
+    gT <- params_estimados["cT"] * T_s[t] + 
+          params_estimados["cT_p"] * pmax(T_s[t] - HT_opt, 0)
+    gP <- params_estimados["cP"] * P_s[t] + 
+          params_estimados["cP_p"] * pmax(P_s[t] - HP_opt, 0)
+    mu <- (params_estimados["c0"] + params_estimados["cI"] * sum(state) + gT + gP) * state[1]
+    preds_1paso[t] <- max(mu, 1e-4) * I_sd
+  }
+  
+  residuos <- I_orig - preds_1paso
+  residuos_esc <- residuos / sd(I_orig, na.rm = TRUE)
+  
+  ss_res <- sum(residuos^2, na.rm = TRUE)
+  ss_tot <- sum((I_orig - mean(I_orig, na.rm = TRUE))^2, na.rm = TRUE)
+  R2 <- ifelse(ss_tot == 0, 0, 1 - ss_res / ss_tot)
+  RMSE <- sqrt(mean(residuos^2, na.rm = TRUE))
+  
+  residuos_limpios <- residuos_esc[is.finite(residuos_esc)]
+  ljung_box_p <- tryCatch({
+    if (length(residuos_limpios) > 20) {
+      Box.test(residuos_limpios, lag = 20, type = "Ljung-Box")$p.value
+    } else NA
+  }, error = function(e) NA)
+  
+  cat("    ✔ R² =", round(R2, 4), "| RMSE =", round(RMSE, 2), "\n")
+  if (!is.na(ljung_box_p)) {
+    cat("    ✔ Ljung-Box p =", round(ljung_box_p, 4), 
+        ifelse(ljung_box_p > 0.05, " (ruido blanco)", " (posible autocorrelación)"), "\n")
+  }
+  
+  # --- AIC/BIC del criterio MSA ---
+  valid_t <- (K_I + 1):(n - K_max)
+  n_obs_msa <- length(valid_t) * K_max
+  k_params <- n_params_estructurales + 2 + n_params_dist
+  
+  nll_final <- optim_result$value
+  AIC_msa <- 2 * nll_final + 2 * k_params
+  BIC_msa <- 2 * nll_final + k_params * log(n_obs_msa)
+  
+  cat("\n")
+  
+  # ---------------------------------------------------------
+  # Retornar resultados
+  # ---------------------------------------------------------
+  list(
+    tabla = tibble(
+      Pais = pais_nombre,
+      Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
+      c0 = round(par_final[1], 4), cI = round(par_final[2], 4),
+      cT = round(par_final[3], 4), cT_prime = round(par_final[4], 4),
+      cP = round(par_final[5], 4), cP_prime = round(par_final[6], 4),
+      `H_T (°C)` = round(HT_orig, 2), `H_P (mm)` = round(HP_orig, 2),
+      theta = if (distribucion == "nbinom") round(theta_final, 3) else NA,
+      NegLogLik = round(nll_final, 2),
+      AIC = round(AIC_msa, 1), BIC = round(BIC_msa, 1),
+      R2 = round(R2, 4), RMSE = round(RMSE, 2),
+      `Ljung-Box (p)` = round(ljung_box_p, 4),
+      Iteraciones = optim_result$counts["function"]
+    ),
+    datos_validacion = tibble(
+      pais = pais_nombre, distribucion = distribucion,
+      semana = seq_along(I_orig), I_obs = I_orig,
+      I_pred = preds_1paso, residuos = residuos, residuos_std = residuos_esc,
+      temp = df_pais$temp_opt, precip = df_pais$precip_opt,
+      fecha = df_pais$fecha_semana
+    ),
+    params = params_estimados,
+    umbrales = c(HT = HT_orig, HP = HP_orig),
+    escala = list(I_sd = I_sd, temp_mu = temp_mu, temp_sd = temp_sd,
+                  precip_mu = precip_mu, precip_sd = precip_sd),
+    grid_completo = grid
   )
 }
 

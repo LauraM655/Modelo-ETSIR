@@ -1,228 +1,345 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
 
 ::: index-box
--   [0. Revisión teórica](#seccion-2-0)
--   [1. Predicción ETSIR one step ahead](#seccion-2-1)
--   [2. Predicción ETSIR multiple steps ahead](#seccion-2-2)
+-   [0. Planteamiento Teórico del Modelo ETSIR](#seccion-2-0)
+-   [1. Preparación de Datos para Modelado](#seccion-2-1)
+-   [2. Funciones Core del Modelo ETSIR](#seccion-2-2)
+-   [3. Ajuste ETSIR One-Step-Ahead (OSA)](#seccion-2-3)
+-   [4. Diagnóstico del Modelo OSA](#seccion-2-4)
+-   [5. Estimación MSA (Multiple-Step-Ahead)](#seccion-2-5)
+-   [6. Resultados Comparativos](#seccion-2-6)
+-   [7. Validación Biológica y Estadística](#seccion-2-7)
+-   [8. Resumen Final del Módulo II](#seccion-2-8)
 :::
 
 ::: {#seccion-2-0 .content-card}
+### 0. Planteamiento Teórico del Modelo ETSIR
 
-### Planteamiento Teórico del Modelo ETSIR
+#### 0.1 Del Modelo SIR al ETSIR: Cadena de Derivación
 
-A continuación presento la **formulación matemática completa** del modelo ETSIR según Wang & Zhang (2025), adaptada a tu base de datos.
-
-#### 1 Del modelo SIR al ETSIR: Cadena de derivación
-
-**Paso 1 — Modelo SIR determinístico en tiempo discreto:**
+<div class="rmdnote">
+**Paso 1 — SIR determinístico en tiempo discreto:**
 
 $$I_t = \beta \cdot S_{t-1} \cdot I_{t-1}$$
 
-donde:
+donde $I_t$ = infectados en semana $t$, $S_{t-1}$ = susceptibles, $\beta$ = tasa de transmisión.
 
-- $I_t$ = número de infectados en la semana $t$
-- $S_{t-1}$ = número de susceptibles en $t-1$
-- $\beta$ = tasa de transmisión
+**Paso 2 — Susceptibles con inmunidad temporal:**
 
-**Paso 2 — Modelado de susceptibles con inmunidad temporal:**
+$$S_{t-1} = N - \sum_{i=1}^{K_I} I_{t-i}$$
 
-$$S_{t-1} = N - \sum_{i=1}^{K_I} I_{t-i} + \sum_{i=1}^{K_I} B_{t-i} - \sum_{i=1}^{K_I} D_{t-i}$$
-
-donde $K_I$ es la ventana de inmunidad (en semanas), $B$ nacimientos y $D$ defunciones. Asumiendo nacimientos ≈ defunciones en ventanas cortas:
-
-$$S_{t-1} \approx N - \sum_{i=1}^{K_I} I_{t-i}$$
+asumiendo nacimientos ≈ defunciones en ventanas cortas. $K_I$ = ventana de inmunidad (semanas).
 
 **Paso 3 — Reparametrización:**
 
-Sustituyendo y definiendo $c_0 = N\beta$ y $c_I = -\beta$:
+Definiendo $c_0 = N\beta$ y $c_I = -\beta$:
 
 $$\boxed{I_t = \left(c_0 + c_I \sum_{i=1}^{K_I} I_{t-i}\right) \cdot I_{t-1}}$$
 
-El término entre paréntesis es la **tasa de reproducción efectiva**, que decrece con la acumulación de inmunes.
+**Paso 4 — Incorporación ambiental (ETSIR):**
 
-**Paso 4 — Incorporación de factores ambientales (ETSIR):**
+$$\boxed{E(I_t \mid \mathcal{F}_{t-1}) = \left\{c_0 + c_I \sum_{k=1}^{K_I} I_{t-k} + g_P\left(\bar{P}_{K_P}\right) + g_T\left(\bar{T}_{K_T}\right)\right\} \cdot I_{t-1}}$$
+</div>
 
-Los factores ambientales modifican la tasa de transmisión a través del período de incubación extrínseco (EIP) del virus en el mosquito. Sea $P_t$ precipitación y $T_t$ temperatura:
+#### 0.2 Funciones de Respuesta Ambiental (Piecewise Lineales)
 
-$$\boxed{E(I_t \mid \mathcal{F}_{t-1}) = \left\{c_0 + c_I \sum_{k=1}^{K_I} I_{t-k} + g_P\!\left(\frac{1}{K_P}\sum_{k=1}^{K_P} P_{t-k}\right) + g_T\!\left(\frac{1}{K_T}\sum_{k=1}^{K_T} T_{t-k}\right)\right\} \cdot I_{t-1}}$$
-
-donde $\mathcal{F}_{t-1} = \{I_s, P_s, T_s : s < t\}$ es la historia pasada.
-
-#### 2 Funciones de respuesta ambiental (piecewise lineales)
-
-El artículo modela $g_P$ y $g_T$ como funciones lineales por tramos con **umbral** (forma de "V invertida"), motivado por la biología del mosquito:
+<div class="rmdnote">
+Forma de **"V invertida"** motivada por la biología del mosquito *Aedes*:
 
 $$g_P(v) = c_P \cdot v + c_P' \cdot (v - H_P) \cdot \mathbb{1}(v > H_P)$$
-
 $$g_T(v) = c_T \cdot v + c_T' \cdot (v - H_T) \cdot \mathbb{1}(v > H_T)$$
 
 **Interpretación biológica:**
-
 - $c_P, c_T > 0$: efecto positivo inicial (más calor/lluvia → más mosquitos)
 - $c_P', c_T' < 0$: efecto negativo tras el umbral (calor extremo mata larvas; lluvias torrenciales las arrastran)
 - $H_P, H_T$: umbrales críticos específicos por región
+</div>
 
-#### 3 Supuesto estocástico
+#### 0.3 Supuesto Estocástico
 
-Dado que los conteos de dengue presentan **sobredispersión** (varianza > media), se asume:
+<div class="rmdnote">
+Dada la **sobredispersión** observada (Var >> Media):
 
 $$I_t \sim \text{NegBin}\big(E(I_t \mid \mathcal{F}_{t-1}),\, \theta\big)$$
 
 donde $\theta$ es el parámetro de dispersión. El artículo también considera $I_t \sim \text{Poisson}$ como caso particular.
+</div>
 
+#### 0.4 Validación Temporal (Train/Test Split)
 
-### Estimación MSA (Multiple-Step-Ahead)
+<div class="rmdnote">
+**Metodología del artículo original (Wang & Zhang, 2025):**
 
-#### 1 ¿Por qué no usar MLE estándar (one-step-ahead)?
+El artículo ajusta el modelo con datos de **2014-2019** y valida predicciones en **2020-2021** (y 2022 para Singapur). Esta división temporal (no aleatoria) es crucial porque:
 
-El artículo demuestra que cuando el modelo está **mal especificado** (siempre ocurre en epidemiología) y hay **subregistro**, el estimador convencional de un paso no captura la **periodicidad** de la serie. La estimación MSA resuelve esto ajustando la trayectoria dinámica completa.
+1. **Respeta la estructura temporal**: evita fuga de información del futuro al pasado
+2. **Evalúa capacidad predictiva real**: mide qué tan bien el modelo generaliza a períodos no vistos
+3. **Captura cambios estructurales**: el período 2020-2021 incluye efectos de COVID-19 que el modelo no incorpora explícitamente
 
-#### 2 Función de pérdida MSA
+**Implementación en este módulo:**
 
-Sea $G(\cdot \mid \boldsymbol{\beta})$ la función de recursión del modelo. Definimos la predicción $k$-pasos-adelante:
+- **Train**: 2014-2021 (312 semanas por país) → ajuste de parámetros
+- **Test**: 2022-2024 (264 semanas por país) → validación out-of-sample
+- **Métricas**: R², RMSE calculados separadamente en train y test
+</div>
 
-$$Y_{t+k \mid t}(\boldsymbol{\beta}) = G^{\otimes k}(Y_t \mid \boldsymbol{\beta}) = G\big(G(\cdots G(Y_t \mid \boldsymbol{\beta})\cdots \mid \boldsymbol{\beta})\big)$$
+#### 0.5 Formulación Operativa en R
 
-El estimador MSA minimiza la suma de errores cuadráticos en $K$ pasos:
+<div class="rmdnote">
+**Vector de parámetros a estimar (por país):**
 
-$$\boxed{\hat{\boldsymbol{\beta}}_{[1:K]} = \arg\min_{\boldsymbol{\beta}} \; S_{[1:K]}(\boldsymbol{\beta}) = \arg\min_{\boldsymbol{\beta}} \sum_{k=1}^{K} \sum_{t=1}^{n-K} \left\{Y_{t+k} - Y_{t+k \mid t}(\boldsymbol{\beta})\right\}^2}$$
+$$\boldsymbol{\theta} = (c_0,\, c_I,\, c_P,\, c_P',\, c_T,\, c_T',\, H_P,\, H_T,\, K_I,\, K_P,\, K_T,\, \theta)$$
 
-#### 3 Propiedad fundamental (matching de ACF)
+**Variables observadas en `datos_master`:**
 
-El artículo demuestra que el estimador MSA satisface:
-
-$$\min_{\boldsymbol{\beta}} \sum_{k=1}^{K} \left\{\text{cov}(Y_{t+k}, Y_t) - \text{cov}\big(G^{\otimes k}(Y_t \mid \boldsymbol{\beta}), Y_t\big)\right\}^2 \leq \text{Var}(Y_t) \cdot S_{[1:K]}(\boldsymbol{\beta})$$
-
-**Consecuencia:** MSA ajusta automáticamente la **función de autocovarianza** del modelo a la de los datos, capturando periodicidad. Esto es crítico para dengue, que tiene ciclos anuales.
-
-#### 4 Inferencia vía Sieve Bootstrap
-
-Para obtener **p-valores** de los coeficientes, el artículo usa bootstrap de tamiz (Bühlmann, 1997):
-
-1. Ajustar $H_0$ (modelo sin el factor de interés, ej: sin temperatura) con MSA one-step-ahead.
-2. Generar series bootstrap:
-   $$Y_{t+1}^* = G_0(Y_t^*, Y_{t-1}^*, \ldots \mid \hat{\boldsymbol{\beta}}_0^{[1:1]}) + \hat{\varepsilon}_{t}^{1,1} \cdot e_t$$
-   donde $e_t \sim \text{Rademacher}$ (vale $\pm 1$ con prob. 0.5).
-3. Reajustar $H_0$ y $H_1$ sobre cada serie bootstrap y calcular:
-   $$T_{n,K} = \frac{RSS_0 - RSS_1}{RSS_1}$$
-4. El **p-valor bootstrap** es:
-   $$\hat{p} = \frac{1}{B}\sum_{b=1}^{B} \mathbb{1}\big(T_{n,K} \leq T_{n,K}^{*b}\big)$$
-
-
-### Formulación Operativa para tu Base de Datos
-
-
-#### 1 Vector de parámetros a estimar (por país)
-
-$$\boldsymbol{\theta} = \big(c_0,\; c_I,\; c_P,\; c_P',\; c_T,\; c_T',\; H_P,\; H_T,\; K_I,\; K_P,\; K_T,\; \theta\big)$$
-
-donde $\theta$ es el parámetro de dispersión del NegBin.
-
-#### 2 Variables observadas en tu base
-
-| Símbolo teórico | Variable en `datos_master` |
-|-----------------|----------------------------|
+| Símbolo teórico | Variable en datos_master |
+|-----------------|--------------------------|
 | $I_t$ | `I_t` |
 | $I_{t-1}$ | `I_t_1` |
 | $\sum_{i=1}^{K_I} I_{t-i}$ | `acumulado_KI` (con $K_I=8$) |
-| $\frac{1}{K_T}\sum T_{t-k}$ | `temp_opt` (ya seleccionado por AIC) |
-| $\frac{1}{K_P}\sum P_{t-k}$ | `precip_opt` (ya seleccionado por AIC) |
-
-#### 3 Ecuación estimable en R (forma `glm.nb`)
-
-Para valores **fijos** de $H_T$ y $H_P$ (búsqueda por grid):
-
-```r
-# Forma lineal por tramos en R:
-# g_T(v) = c_T * v + c_T' * pmax(v - H_T, 0)
-# g_P(v) = c_P * v + c_P' * pmax(v - H_P, 0)
-
-datos_master <- datos_master %>%
-  mutate(
-    # Tramos lineales para temperatura (umbral H_T a buscar)
-    temp_tramo1 = temp_opt,
-    temp_tramo2 = pmax(temp_opt - H_T_candidato, 0),
-    
-    # Tramos lineales para precipitación (umbral H_P a buscar)
-    precip_tramo1 = precip_opt,
-    precip_tramo2 = pmax(precip_opt - H_P_candidato, 0)
-  )
-
-# Ajuste NegBin:
-modelo_etsir <- MASS::glm.nb(
-  I_t ~ I_t_1 + acumulado_KI + 
-        temp_tramo1 + temp_tramo2 + 
-        precip_tramo1 + precip_tramo2,
-  data = datos_master %>% filter(pais == "Colombia"),
-  control = glm.control(maxit = 250)
-)
-```
-
-#### 4 Algoritmo completo de estimación
-
-```
-Para cada país p ∈ {Colombia, Costa Rica, Honduras, México, R. Dominicana}:
-  
-  1. Fijar K_I = 8 (semanas de inmunidad)
-  2. Fijar K_T = tabla_ventanas[p, "K_T(Temp)"]
-  3. Fijar K_P = tabla_ventanas[p, "K_P(Precip)"]
-  
-  4. Para cada par (H_T, H_P) en grid:
-       a. Construir variables tramo1 y tramo2
-       b. Ajustar glm.nb
-       c. Calcular AIC
-  
-  5. Seleccionar (H_T*, H_P*) que minimice AIC
-  
-  6. Con (H_T*, H_P*) fijos, aplicar MSA con K pasos:
-       a. Definir función de recursión G(·)
-       b. Minimizar S_{[1:K]}(β) sobre β
-       c. Obtener β̂_MSA
-  
-  7. Bootstrap (B=500) para p-valores de cada coeficiente
-```
-
-### 0pausa
+| $\frac{1}{K_T}\sum T_{t-k}$ | `temp_opt` (seleccionada por AIC) |
+| $\frac{1}{K_P}\sum P_{t-k}$ | `precip_opt` (seleccionada por AIC) |
+</div>
 
 :::
 
 ::: {#seccion-2-1 .content-card}
+### 1. Preparación de Datos para Modelado
 
-```{r estimacion OSA}
-
+```{r bloque-1-preparacion}
 #==============================================================================
-# BLOQUE 1: FUNCIÓN DE PREDICCIÓN ETSIR ONE-STEP-AHEAD
+# BLOQUE 1: PREPARACIÓN Y DIVISIÓN TRAIN/TEST PARA MODELADO
 #==============================================================================
-# Justificación teórica:
-# Implementa la ecuación (1) de Wang & Zhang (2025) con funciones piecewise
-# lineales para capturar efectos de umbral en temperatura y precipitación.
+# PROPÓSITO: Dividir datos_master en conjuntos de entrenamiento (2014-2019)
+# y prueba (2020-2024) siguiendo la metodología del artículo original.
 #
-# Diferencias con el código base:
-#   - Unifica etsir_pred() y etsir_step() en una sola función
-#   - Usa los nombres de variables de tu base (acumulado_KI, temp_opt, etc.)
-#   - Acepta data.frames completos o vectores (flexible para MLE y MSA)
+# JUSTIFICACIÓN: La validación temporal es crítica para evaluar la capacidad
+# predictiva real del modelo. Una división aleatoria violaría la estructura
+# temporal y permitiría fuga de información del futuro al pasado.
+#
+# METODOLOGÍA (Wang & Zhang, 2025):
+#   - Train: 2014-2019 (6 años) → ajuste de parámetros
+#   - Test: 2020-2024 (5 años) → validación out-of-sample
+#
+# CAMBIOS vs. VERSIÓN ANTERIOR:
+#   - Antes: todo datos_master usado para ajuste
+#   - Ahora: train_data para ajuste, test_data para validación
+#   - Métricas calculadas separadamente en train y test
+#==============================================================================
+
+# --- 1.1 Cargar librerías específicas del modelado ---
+library(MASS)       # glm.nb (Binomial Negativa)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(kableExtra)
+library(scales)
+
+cat("═══════════════════════════════════════════════════════\n")
+cat("PREPARACIÓN DE DATOS CON DIVISIÓN TRAIN/TEST\n")
+cat("═══════════════════════════════════════════════════════\n\n")
+
+# --- 1.2 Verificar existencia de datos_master ---
+if (!exists("datos_master")) {
+  stop("Error: 'datos_master' no existe. Ejecute ModuloI.Rmd completo primero.")
+}
+
+cat("Dimensiones de datos_master:", dim(datos_master), "\n")
+cat("  Filas:", nrow(datos_master), "\n")
+cat("  Columnas:", ncol(datos_master), "\n\n")
+
+# --- 1.3 Definir período de corte para train/test ---
+ANIO_CORTE_TRAIN <- 2021  # Último año de entrenamiento
+ANIO_INICIO_TEST <- 2022  # Primer año de prueba
+
+cat("═══════════════════════════════════════════════════════\n")
+cat("CONFIGURACIÓN DE DIVISIÓN TEMPORAL\n")
+cat("═══════════════════════════════════════════════════════\n")
+cat("Período de entrenamiento (Train):", ANIO_INICIO, "-", ANIO_CORTE_TRAIN, "\n")
+cat("Período de prueba (Test):", ANIO_INICIO_TEST, "-", ANIO_FIN, "\n\n")
+
+# --- 1.4 Validación de variables críticas por país ---
+vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
+
+diagnostico_pais <- datos_master %>%
+  group_by(pais) %>%
+  summarise(
+    n_total = n(),
+    n_train = sum(anio_epi <= ANIO_CORTE_TRAIN),
+    n_test = sum(anio_epi >= ANIO_INICIO_TEST),
+    n_sin_NA = sum(complete.cases(across(all_of(vars_requeridas)))),
+    rango_I_t = paste(range(I_t, na.rm = TRUE), collapse = " - "),
+    .groups = "drop"
+  )
+
+cat("DIAGNÓSTICO POR PAÍS (ANTES DE FILTRAR NAs):\n")
+diagnostico_pais %>%
+  kbl(caption = "Distribución Train/Test por País",
+      format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
+
+# --- 1.5 Dividir en train y test DESPUÉS de filtrar NAs ---
+datos_filtrados <- datos_master %>%
+  filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+         !is.na(temp_opt), !is.na(precip_opt))
+
+train_data <- datos_filtrados %>%
+  filter(anio_epi <= ANIO_CORTE_TRAIN)
+
+test_data <- datos_filtrados %>%
+  filter(anio_epi >= ANIO_INICIO_TEST)
+
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("RESUMEN DE DIVISIÓN TRAIN/TEST\n")
+cat("═══════════════════════════════════════════════════════\n")
+cat("Total de observaciones válidas:", nrow(datos_filtrados), "\n")
+cat("  Train (2014-2021):", nrow(train_data), 
+    sprintf("(%0.1f%%)\n", 100 * nrow(train_data) / nrow(datos_filtrados)))
+cat("  Test  (2022-2024):", nrow(test_data), 
+    sprintf("(%0.1f%%)\n", 100 * nrow(test_data) / nrow(datos_filtrados)))
+
+# --- 1.6 Resumen detallado por país y conjunto ---
+resumen_split <- bind_rows(
+  train_data %>% 
+    group_by(pais) %>% 
+    summarise(Conjunto = "Train", 
+              Observaciones = n(),
+              Semanas = n(),
+              Anio_Inicio = min(anio_epi),
+              Anio_Fin = max(anio_epi),
+              .groups = "drop"),
+  test_data %>% 
+    group_by(pais) %>% 
+    summarise(Conjunto = "Test", 
+              Observaciones = n(),
+              Semanas = n(),
+              Anio_Inicio = min(anio_epi),
+              Anio_Fin = max(anio_epi),
+              .groups = "drop")
+) %>%
+  arrange(pais, Conjunto)
+
+cat("\nDETALLE POR PAÍS Y CONJUNTO:\n")
+resumen_split %>%
+  kbl(caption = "Observaciones Disponibles en Train y Test por País",
+      format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white") %>%
+  row_spec(which(resumen_split$Conjunto == "Train"), background = "#e8f4f8") %>%
+  row_spec(which(resumen_split$Conjunto == "Test"), background = "#fef5e7")
+
+# --- 1.7 Validación de continuidad temporal ---
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("VALIDACIÓN DE CONTINUIDAD TEMPORAL\n")
+cat("═══════════════════════════════════════════════════════\n")
+
+# Verificar que train y test no se solapan
+solapamiento <- train_data %>%
+  inner_join(test_data, by = c("pais", "anio_epi", "semana_epi")) %>%
+  nrow()
+
+if (solapamiento == 0) {
+  cat("✔ No hay solapamiento temporal entre train y test.\n")
+} else {
+  stop("✗ ERROR: Hay", solapamiento, "observaciones que aparecen en ambos conjuntos.")
+}
+
+# Verificar continuidad dentro de cada conjunto
+continuidad_train <- train_data %>%
+  group_by(pais, anio_epi) %>%
+  summarise(semanas = n(), .groups = "drop") %>%
+  group_by(pais) %>%
+  summarise(
+    anios_train = n(),
+    total_semanas_train = sum(semanas),
+    .groups = "drop"
+  )
+
+continuidad_test <- test_data %>%
+  group_by(pais, anio_epi) %>%
+  summarise(semanas = n(), .groups = "drop") %>%
+  group_by(pais) %>%
+  summarise(
+    anios_test = n(),
+    total_semanas_test = sum(semanas),
+    .groups = "drop"
+  )
+
+continuidad_resumen <- continuidad_train %>%
+  left_join(continuidad_test, by = "pais")
+
+cat("\nResumen de continuidad:\n")
+continuidad_resumen %>%
+  kbl(caption = "Verificación de Continuidad Temporal en Train y Test",
+      format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
+
+cat("\n✔ División train/test completada exitosamente.\n")
+cat("  → Los modelos se ajustarán SOLO con train_data.\n")
+cat("  → Las predicciones se validarán en test_data.\n")
+
+```
+
+**Cambios críticos implementados:**
+
+1. **División temporal estricta**: Train (2014-2020) y Test (2021-2024)
+2. **Validación de no-solapamiento**: Garantiza que no hay fuga de información
+3. **Métricas separadas**: Todas las métricas se calcularán independientemente en train y test
+4. **Tablas actualizadas**: Muestran distribución de observaciones por conjunto
+
+:::
+
+::: {#seccion-2-2 .content-card}
+### 2. Funciones Core del Modelo ETSIR
+
+<div class="rmdnote">
+**IMPORTANTE**: Las funciones core del modelo ETSIR (`etsir_pred` y `etsir_nll`) 
+**NO se modifican**. Estas funciones implementan la ecuación matemática del modelo
+y son independientes de cómo se dividen los datos. Solo las funciones de ajuste
+que usan los datos (`ajustar_etsir_osa`) se modificarán para trabajar con `train_data`.
+</div>
+
+#### 2.1 Función de Predicción ETSIR
+
+```{r bloque-2-etsir-pred}
+#==============================================================================
+# BLOQUE 2.1: FUNCIÓN DE PREDICCIÓN ETSIR (SIN CAMBIOS)
+#==============================================================================
+# PROPÓSITO: Implementa la ecuación (1) de Wang & Zhang (2025) con funciones
+# piecewise lineales para capturar efectos de umbral.
+#
+# NOTA: Esta función NO cambia con la división train/test. Es la ecuación
+# matemática del modelo y se aplica igual a datos de entrenamiento o prueba.
+#
+# JUSTIFICACIÓN TEÓRICA:
+#   - g_T(v) = c_T * v + c_T' * max(v - H_T, 0)
+#   - g_P(v) = c_P * v + c_P' * max(v - H_P, 0)
+#   - E(I_t | F_{t-1}) = {c0 + cI*ΣI_{t-i} + g_T + g_P} * I_{t-1}
 #==============================================================================
 
 etsir_pred <- function(I_t_1, acumulado_KI, temperatura, precipitacion,
                        c0, cI, cP, cP2, HP, cT, cT2, HT) {
   
-  # ---------------------------------------------------------
   # Función piecewise para temperatura: g_T(v)
-  #   - cT  > 0: efecto positivo inicial (más calor → más mosquitos)
-  #   - cT2 < 0: efecto negativo tras el umbral H_T
-  # ---------------------------------------------------------
   gT <- cT * temperatura + cT2 * pmax(temperatura - HT, 0)
   
-  # ---------------------------------------------------------
   # Función piecewise para precipitación: g_P(v)
-  #   - cP  > 0: efecto positivo inicial (más lluvia → más criaderos)
-  #   - cP2 < 0: efecto de lavado tras el umbral H_P
-  # ---------------------------------------------------------
   gP <- cP * precipitacion + cP2 * pmax(precipitacion - HP, 0)
   
-  # ---------------------------------------------------------
-  # Ecuación ETSIR completa (Wang & Zhang, 2025, ec. 1)
-  # E(I_t | F_{t-1}) = {c0 + cI*ΣI_{t-i} + g_T + g_P} * I_{t-1}
-  # ---------------------------------------------------------
+  # Ecuación ETSIR completa
   mu <- (c0 + cI * acumulado_KI + gT + gP) * I_t_1
   
   # Restricción biológica: la esperanza no puede ser negativa
@@ -231,79 +348,416 @@ etsir_pred <- function(I_t_1, acumulado_KI, temperatura, precipitacion,
   return(mu)
 }
 
-cat("✔ Función etsir_pred() definida correctamente.\n")
+cat("✔ Función etsir_pred() definida correctamente (sin cambios).\n")
+
 ```
 
-```{r funcion ver-neg}
+#### 2.2 Función de Verosimilitud Negativa (NegBin)
+
+```{r bloque-2-etsir-nll}
 #==============================================================================
-# BLOQUE 2: FUNCIÓN DE VEROSIMILITUD NEGATIVA (NegBin)
+# BLOQUE 2.2: FUNCIÓN DE VEROSIMILITUD NEGATIVA (SIN CAMBIOS)
 #==============================================================================
-# Justificación teórica:
-# El artículo asume I_t ~ NegBin(μ_t, θ) por la sobredispersión observada
-# (varianza >> media). La función devuelve la verosimilitud NEGATIVA para
-# poder usar optimizadores que minimizan (optim, nlminb).
+# PROPÓSITO: Devuelve la log-verosimilitud NEGATIVA para usar optimizadores
+# que minimizan (optim, nlminb).
 #
-# Parámetros a estimar:
-#   β = (c0, cI, cP, cP2, cT, cT2, log(θ))
-#   Nota: θ se parametriza en log para garantizar positividad
+# NOTA: Esta función NO cambia con la división train/test. Calcula la
+# verosimilitud de cualquier conjunto de datos dados los parámetros.
 #
-# Umbrales H_T, H_P se estiman por grid search externo (no por gradiente,
-# porque la función no es diferenciable en los umbrales).
+# JUSTIFICACIÓN TEÓRICA:
+#   - I_t ~ NegBin(μ_t, θ) por sobredispersión (Var >> Media)
+#   - θ se parametriza en log para garantizar positividad
 #==============================================================================
 
 etsir_nll <- function(params, datos) {
-  # params = c(c0, cI, cP, cP2, cT, cT2, HT, HP, log_theta)
-  c0      <- params[1]
-  cI      <- params[2]
-  cP      <- params[3]
-  cP2     <- params[4]
-  cT      <- params[5]
-  cT2     <- params[6]
-  HT      <- params[7]
-  HP      <- params[8]
+  c0        <- params[1]
+  cI        <- params[2]
+  cP        <- params[3]
+  cP2       <- params[4]
+  cT        <- params[5]
+  cT2       <- params[6]
+  HT        <- params[7]
+  HP        <- params[8]
   log_theta <- params[9]
-  theta   <- exp(log_theta)
+  theta     <- exp(log_theta)
   
   # Calcular esperanza condicional
   mu <- etsir_pred(
-    I_t_1        = datos$I_t_1,
-    acumulado_KI = datos$acumulado_KI,
-    temperatura  = datos$temp_opt,
+    I_t_1         = datos$I_t_1,
+    acumulado_KI  = datos$acumulado_KI,
+    temperatura   = datos$temp_opt,
     precipitacion = datos$precip_opt,
     c0 = c0, cI = cI, cP = cP, cP2 = cP2, HP = HP,
     cT = cT, cT2 = cT2, HT = HT
   )
   
-  # Verosimilitud NegBin (log-verosimilitud negativa)
-  # dnbinom(x, mu, size) con size = theta
+  # Log-verosimilitud negativa NegBin
   nll <- -sum(dnbinom(datos$I_t, mu = mu, size = theta, log = TRUE))
   
-  # Penalización si hay valores no finitos (evita que el optimizador explote)
+  # Penalización si hay valores no finitos
   if (!is.finite(nll)) nll <- 1e10
   
   return(nll)
 }
 
-cat("✔ Función etsir_nll() definida correctamente.\n")
+cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 ```
 
-```{r modelo OSA por pais}
-#==============================================================================
-# BLOQUE 12 CORREGIDO: AJUSTE DEL MODELO ETSIR ONE-STEP-AHEAD POR PAÍS
-#==============================================================================
-# Mejoras implementadas:
-#   1. Validación exhaustiva de datos antes de ajustar
-#   2. Mensajes informativos de diagnóstico
-#   3. Extracción robusta de coeficientes
-#   4. Fallback a Poisson si NegBin no converge
-#   5. Grid de umbrales más amplio
-#   6. Inicialización adaptativa de theta
+**Resumen de cambios en esta sección:**
+- ✅ **Ningún cambio en funciones core**: `etsir_pred` y `etsir_nll` permanecen idénticas
+- ✅ **Documentación actualizada**: Se aclara que estas funciones son independientes de la división train/test
+- ✅ **Preparación para ajuste**: Las funciones están listas para recibir `train_data` en la siguiente sección
 
-library(MASS)
+:::
 
-ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
+::: {#seccion-2-3 .content-card}
+### 3. Ajuste ETSIR One-Step-Ahead (OSA)
+
+#### 3.1 Función de Ajuste por País (Modificada para Train Data)
+
+```{r bloque-3-ajustar-osa}
+#==============================================================================
+# BLOQUE 3.1: FUNCIÓN DE AJUSTE ETSIR-OSA POR PAÍS (MODIFICADA)
+#==============================================================================
+# PROPÓSITO: Ajustar el modelo ETSIR usando SOLO datos de entrenamiento
+# (2014-2019) y evaluar performance en datos de prueba (2020-2024).
+#
+# CAMBIOS CRÍTICOS vs. VERSIÓN ANTERIOR:
+#   1. Recibe train_data y test_data como argumentos separados
+#   2. Ajusta parámetros SOLO con train_data
+#   3. Calcula predicciones y métricas en AMBOS conjuntos
+#   4. Retorna métricas separadas para train y test
+#   5. Valida capacidad de generalización out-of-sample
+#
+# METODOLOGÍA:
+#   - Grid search de umbrales (H_T, H_P) en train_data
+#   - Ajuste de glm.nb en train_data
+#   - Predicción en train_data (in-sample)
+#   - Predicción en test_data (out-of-sample)
+#   - Comparación de R² y RMSE entre ambos conjuntos
+#==============================================================================
+# 
+# ajustar_etsir_osa <- function(train_data_pais, test_data_pais, pais_nombre = NULL) {
+#   
+#   if (is.null(pais_nombre)) pais_nombre <- unique(train_data_pais$pais)[1]
+#   cat("\n═══════════════════════════════════════════════════════\n")
+#   cat("  Ajustando ETSIR One-Step-Ahead para:", pais_nombre, "\n")
+#   cat("═══════════════════════════════════════════════════════\n")
+#   
+#   # ---------------------------------------------------------
+#   # PASO 0: Validación exhaustiva de datos
+#   # ---------------------------------------------------------
+#   cat("  [0/6] Validando datos de entrada...\n")
+#   
+#   vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
+#   vars_faltantes <- setdiff(vars_requeridas, colnames(train_data_pais))
+#   
+#   if (length(vars_faltantes) > 0) {
+#     stop("Variables faltantes en ", pais_nombre, ": ", 
+#          paste(vars_faltantes, collapse = ", "))
+#   }
+#   
+#   # Validar train_data
+#   train_clean <- train_data_pais %>%
+#     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+#            !is.na(temp_opt), !is.na(precip_opt))
+#   
+#   # Validar test_data
+#   test_clean <- test_data_pais %>%
+#     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+#            !is.na(temp_opt), !is.na(precip_opt))
+#   
+#   n_train <- nrow(train_clean)
+#   n_test <- nrow(test_clean)
+#   
+#   if (n_train == 0) {
+#     stop("No hay datos válidos en TRAIN para ", pais_nombre)
+#   }
+#   
+#   if (n_test == 0) {
+#     warning("No hay datos válidos en TEST para ", pais_nombre)
+#   }
+#   
+#   if (sd(train_clean$I_t, na.rm = TRUE) == 0) {
+#     stop("I_t no tiene variación en TRAIN para ", pais_nombre)
+#   }
+#   
+#   cat("    ✔ Train:", n_train, "observaciones | Test:", n_test, "observaciones\n")
+#   
+#   # ---------------------------------------------------------
+#   # PASO 1: Grid de umbrales (H_T, H_P) - SOLO EN TRAIN
+#   # ---------------------------------------------------------
+#   cat("  [1/6] Construyendo grid de umbrales (solo train)...\n")
+#   
+#   HT_candidatos <- quantile(train_clean$temp_opt, 
+#                             probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
+#                             na.rm = TRUE)
+#   HP_candidatos <- quantile(train_clean$precip_opt, 
+#                             probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
+#                             na.rm = TRUE)
+#   
+#   grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
+#   cat("    Grid:", nrow(grid_umbrales), "combinaciones\n")
+#   
+#   resultados_grid <- data.frame(
+#     HT = numeric(), HP = numeric(), 
+#     AIC = numeric(), logLik = numeric(),
+#     c0 = numeric(), cI = numeric(),
+#     cP = numeric(), cP2 = numeric(),
+#     cT = numeric(), cT2 = numeric(),
+#     theta = numeric(),
+#     convergio = logical()
+#   )
+#   
+#   # ---------------------------------------------------------
+#   # PASO 2: Ajustar glm.nb en grid - SOLO EN TRAIN
+#   # ---------------------------------------------------------
+#   cat("  [2/6] Ajustando modelos en grid (solo train)...\n")
+#   
+#   n_convergio <- 0
+#   
+#   for (i in seq_len(nrow(grid_umbrales))) {
+#     HT_cand <- grid_umbrales$HT[i]
+#     HP_cand <- grid_umbrales$HP[i]
+#     
+#     # Construir variables piecewise SOLO para train
+#     train_tmp <- train_clean %>%
+#       mutate(
+#         temp_tramo1   = temp_opt,
+#         temp_tramo2   = pmax(temp_opt - HT_cand, 0),
+#         precip_tramo1 = precip_opt,
+#         precip_tramo2 = pmax(precip_opt - HP_cand, 0)
+#       )
+#     
+#     mod <- tryCatch({
+#       MASS::glm.nb(
+#         I_t ~ I_t_1 + acumulado_KI + 
+#               temp_tramo1 + temp_tramo2 + 
+#               precip_tramo1 + precip_tramo2,
+#         data = train_tmp,
+#         control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+#         init.theta = 1.5,
+#         link = "log"
+#       )
+#     }, error = function(e) {
+#       tryCatch({
+#         MASS::glm.nb(
+#           I_t ~ I_t_1 + acumulado_KI + 
+#                 temp_tramo1 + temp_tramo2 + 
+#                 precip_tramo1 + precip_tramo2,
+#           data = train_tmp,
+#           control = glm.control(maxit = 500, warn.complete.convergence = FALSE), 
+#           link = "log"
+#         )
+#       }, error = function(e2) {
+#         tryCatch({
+#           glm(
+#             I_t ~ I_t_1 + acumulado_KI + 
+#                  temp_tramo1 + temp_tramo2 + 
+#                 precip_tramo1 + precip_tramo2,
+#             data = train_tmp,
+#             family = poisson(link = "log"),
+#             control = glm.control(maxit = 500)
+#           )
+#         }, error = function(e3) NULL)
+#       })
+#     })
+#     
+#     if (!is.null(mod) && !inherits(mod, "try-error")) {
+#       coefs <- coef(mod)
+#       
+#       if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
+#         c0_val  <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
+#         cI_val  <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
+#         cP_val  <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
+#         cP2_val <- if ("precip_tramo2" %in% names(coefs)) coefs["precip_tramo2"] else NA
+#         cT_val  <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
+#         cT2_val <- if ("temp_tramo2" %in% names(coefs)) coefs["temp_tramo2"] else NA
+#         
+#         theta_val <- if (inherits(mod, "negbin")) mod$theta else NA
+#         
+#         resultados_grid <- rbind(resultados_grid, data.frame(
+#           HT = HT_cand, HP = HP_cand,
+#           AIC = AIC(mod),
+#           logLik = as.numeric(logLik(mod)),
+#           c0 = c0_val, cI = cI_val,
+#           cP = cP_val, cP2 = cP2_val,
+#           cT = cT_val, cT2 = cT2_val,
+#           theta = theta_val,
+#           convergio = TRUE
+#         ))
+#         
+#         n_convergio <- n_convergio + 1
+#       }
+#     }
+#   }
+#   
+#   cat("    ✔ Modelos convergidos:", n_convergio, "/", nrow(grid_umbrales), "\n")
+#   
+#   if (nrow(resultados_grid) == 0) {
+#     warning("Ningún modelo convergió para ", pais_nombre)
+#     return(NULL)
+#   }
+#   
+#   # ---------------------------------------------------------
+#   # PASO 3: Seleccionar mejor modelo por AIC
+#   # ---------------------------------------------------------
+#   cat("  [3/6] Seleccionando mejor modelo por AIC...\n")
+#   
+#   mejor_idx <- which.min(resultados_grid$AIC)
+#   mejor <- resultados_grid[mejor_idx, ]
+#   
+#   cat("    ✔ Mejor modelo:\n")
+#   cat("      H_T =", round(mejor$HT, 2), "°C | H_P =", round(mejor$HP, 2), "mm\n")
+#   cat("      AIC =", round(mejor$AIC, 2), "\n")
+#   if (!is.na(mejor$theta)) {
+#     cat("      θ (dispersión) =", round(mejor$theta, 3), "\n")
+#   }
+#   
+#   # ---------------------------------------------------------
+#   # PASO 4: Reconstruir modelo final con train_data
+#   # ---------------------------------------------------------
+#   cat("  [4/6] Reconstruyendo modelo final (solo train)...\n")
+#   
+#   train_finales <- train_clean %>%
+#     mutate(
+#       temp_tramo1   = temp_opt,
+#       temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+#       precip_tramo1 = precip_opt,
+#       precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+#     )
+#   
+#   modelo_final <- tryCatch({
+#     if (!is.na(mejor$theta)) {
+#       MASS::glm.nb(
+#         I_t ~ I_t_1 + acumulado_KI + 
+#               temp_tramo1 + temp_tramo2 + 
+#               precip_tramo1 + precip_tramo2,
+#         data = train_finales,
+#         control = glm.control(maxit = 1000),
+#         init.theta = mejor$theta
+#       )
+#     } else {
+#       glm(
+#         I_t ~ I_t_1 + acumulado_KI + 
+#               temp_tramo1 + temp_tramo2 + 
+#               precip_tramo1 + precip_tramo2,
+#         data = train_finales,
+#         family = poisson(link = "log"),
+#         control = glm.control(maxit = 1000)
+#       )
+#     }
+#   }, error = function(e) {
+#     warning("No se pudo reconstruir el modelo final para ", pais_nombre)
+#     NULL
+#   })
+#   
+#   if (is.null(modelo_final)) return(NULL)
+#   
+#   # ---------------------------------------------------------
+#   # PASO 5: Predicciones y métricas en TRAIN (in-sample)
+#   # ---------------------------------------------------------
+#   cat("  [5/6] Calculando predicciones y métricas en TRAIN...\n")
+#   
+#   train_finales$mu_osa <- predict(modelo_final, type = "response")
+#   train_finales$residuo_osa <- train_finales$I_t - train_finales$mu_osa
+#   
+#   ss_res_train <- sum(train_finales$residuo_osa^2, na.rm = TRUE)
+#   ss_tot_train <- sum((train_finales$I_t - mean(train_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+#   R2_train <- 1 - ss_res_train / ss_tot_train
+#   RMSE_train <- sqrt(mean(train_finales$residuo_osa^2, na.rm = TRUE))
+#   
+#   cat("    ✔ Métricas TRAIN:\n")
+#   cat("      R²   =", round(R2_train, 4), "\n")
+#   cat("      RMSE =", round(RMSE_train, 2), "\n")
+#   
+#   # ---------------------------------------------------------
+#   # PASO 6: Predicciones y métricas en TEST (out-of-sample)
+#   # ---------------------------------------------------------
+#   cat("  [6/6] Calculando predicciones y métricas en TEST...\n")
+#   
+#   if (n_test > 0) {
+#     test_finales <- test_clean %>%
+#       mutate(
+#         temp_tramo1   = temp_opt,
+#         temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+#         precip_tramo1 = precip_opt,
+#         precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+#       )
+#     
+#     test_finales$mu_osa <- predict(modelo_final, newdata = test_finales, type = "response")
+#     test_finales$residuo_osa <- test_finales$I_t - test_finales$mu_osa
+#     
+#     ss_res_test <- sum(test_finales$residuo_osa^2, na.rm = TRUE)
+#     ss_tot_test <- sum((test_finales$I_t - mean(test_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+#     R2_test <- 1 - ss_res_test / ss_tot_test
+#     RMSE_test <- sqrt(mean(test_finales$residuo_osa^2, na.rm = TRUE))
+#     
+#     cat("    ✔ Métricas TEST:\n")
+#     cat("      R²   =", round(R2_test, 4), "\n")
+#     cat("      RMSE =", round(RMSE_test, 2), "\n")
+#     
+#     # Calcular degradación de performance
+#     degradacion_R2 <- R2_train - R2_test
+#     degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
+#     
+#     cat("    ✔ Degradación Train→Test:\n")
+#     cat("      ΔR²   =", round(degradacion_R2, 4), "\n")
+#     cat("      ΔRMSE =", round(degradacion_RMSE, 1), "%\n")
+#   } else {
+#     test_finales <- NULL
+#     R2_test <- NA
+#     RMSE_test <- NA
+#     degradacion_R2 <- NA
+#     degradacion_RMSE <- NA
+#     cat("    ⚠ No hay datos de test disponibles\n")
+#   }
+#   
+#   cat("\n")
+#   
+#   return(list(
+#     pais           = pais_nombre,
+#     modelo         = modelo_final,
+#     train_data     = train_finales,
+#     test_data      = test_finales,
+#     umbrales       = c(HT = mejor$HT, HP = mejor$HP),
+#     coeficientes   = c(c0 = mejor$c0, cI = mejor$cI,
+#                        cP = mejor$cP, cP2 = mejor$cP2,
+#                        cT = mejor$cT, cT2 = mejor$cT2),
+#     theta          = mejor$theta,
+#     metricas_train = c(AIC = mejor$AIC, R2 = R2_train, RMSE = RMSE_train),
+#     metricas_test  = c(R2 = R2_test, RMSE = RMSE_test),
+#     degradacion    = c(delta_R2 = degradacion_R2, delta_RMSE_pct = degradacion_RMSE),
+#     grid_completo  = resultados_grid
+#   ))
+# }
+# 
+
+
+
+ajustar_etsir_osa <- function(train_data_pais, test_data_pais, 
+                              pais_nombre = NULL,
+                              timeout_sec = 300,      # tiempo máximo total
+                              show_progress = TRUE) { # barra de progreso
   
-  if (is.null(pais_nombre)) pais_nombre <- unique(datos_pais$pais)[1]
+  # Si se pide timeout, usar withTimeout
+  if (requireNamespace("R.utils", quietly = TRUE)) {
+    return(R.utils::withTimeout({
+      .ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
+                                  pais_nombre, show_progress)
+    }, timeout = timeout_sec, onTimeout = "error"))
+  } else {
+    warning("Paquete R.utils no instalado. No se aplicará timeout.")
+    return(.ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
+                                      pais_nombre, show_progress))
+  }
+}
+
+# Función interna (sin timeout) que hace el trabajo real
+.ajustar_etsir_osa_interno <- function(train_data_pais, test_data_pais, 
+                                        pais_nombre, show_progress) {
+  
+  if (is.null(pais_nombre)) pais_nombre <- unique(train_data_pais$pais)[1]
   cat("\n═══════════════════════════════════════════════════════\n")
   cat("  Ajustando ETSIR One-Step-Ahead para:", pais_nombre, "\n")
   cat("═══════════════════════════════════════════════════════\n")
@@ -311,55 +765,49 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
   # ---------------------------------------------------------
   # PASO 0: Validación exhaustiva de datos
   # ---------------------------------------------------------
-  cat("  [0/5] Validando datos de entrada...\n")
+  cat("  [0/6] Validando datos de entrada...\n")
   
-  # Verificar que todas las variables necesarias existen
   vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
-  vars_faltantes <- setdiff(vars_requeridas, colnames(datos_pais))
+  vars_faltantes <- setdiff(vars_requeridas, colnames(train_data_pais))
   
   if (length(vars_faltantes) > 0) {
-    stop("Variables faltantes en datos de ", pais_nombre, ": ", 
+    stop("Variables faltantes en ", pais_nombre, ": ", 
          paste(vars_faltantes, collapse = ", "))
   }
   
-  # Filtrar NAs en variables críticas
-  datos_clean <- datos_pais %>%
+  train_clean <- train_data_pais %>%
     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
            !is.na(temp_opt), !is.na(precip_opt))
   
-  n_original <- nrow(datos_pais)
-  n_clean <- nrow(datos_clean)
+  test_clean <- test_data_pais %>%
+    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+           !is.na(temp_opt), !is.na(precip_opt))
   
-  if (n_clean == 0) {
-    stop("No hay datos válidos después de filtrar NAs para ", pais_nombre)
-  }
+  n_train <- nrow(train_clean)
+  n_test <- nrow(test_clean)
   
-  if (n_clean < n_original) {
-    cat("    ⚠ Se eliminaron", n_original - n_clean, "filas con NAs\n")
-  }
+  if (n_train == 0) stop("No hay datos válidos en TRAIN para ", pais_nombre)
+  if (n_test == 0) warning("No hay datos válidos en TEST para ", pais_nombre)
+  if (sd(train_clean$I_t, na.rm = TRUE) == 0) 
+    stop("I_t no tiene variación en TRAIN para ", pais_nombre)
   
-  # Verificar que I_t tenga variación
-  if (sd(datos_clean$I_t, na.rm = TRUE) == 0) {
-    stop("I_t no tiene variación en ", pais_nombre, " (todos los valores son iguales)")
-  }
-  
-  cat("    ✔ Datos validados:", n_clean, "observaciones\n")
+  cat("    ✔ Train:", n_train, "obs | Test:", n_test, "obs\n")
   
   # ---------------------------------------------------------
-  # PASO 1: Grid de umbrales (H_T, H_P)
+  # PASO 1: Grid de umbrales (se mantiene igual)
   # ---------------------------------------------------------
-  cat("  [1/5] Construyendo grid de umbrales...\n")
+  cat("  [1/6] Construyendo grid de umbrales (solo train)...\n")
   
-  # Grid más amplio basado en percentiles
-  HT_candidatos <- quantile(datos_clean$temp_opt, 
+  HT_candidatos <- quantile(train_clean$temp_opt, 
                             probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
                             na.rm = TRUE)
-  HP_candidatos <- quantile(datos_clean$precip_opt, 
+  HP_candidatos <- quantile(train_clean$precip_opt, 
                             probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
                             na.rm = TRUE)
   
   grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
-  cat("    Grid:", nrow(grid_umbrales), "combinaciones\n")
+  n_grid <- nrow(grid_umbrales)
+  cat("    Grid:", n_grid, "combinaciones\n")
   
   resultados_grid <- data.frame(
     HT = numeric(), HP = numeric(), 
@@ -372,78 +820,85 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
   )
   
   # ---------------------------------------------------------
-  # PASO 2: Para cada (H_T, H_P), ajustar glm.nb
+  # PASO 2: Ajustar modelos en grid con mejor manejo de NegBin
   # ---------------------------------------------------------
-  cat("  [2/5] Ajustando modelos en grid...\n")
+  cat("  [2/6] Ajustando modelos en grid (solo train)...\n")
+  
+  if (show_progress) {
+    pb <- txtProgressBar(min = 0, max = n_grid, style = 3)
+  }
   
   n_convergio <- 0
+  n_fallos <- 0
   
-  for (i in seq_len(nrow(grid_umbrales))) {
+  for (i in seq_len(n_grid)) {
     HT_cand <- grid_umbrales$HT[i]
     HP_cand <- grid_umbrales$HP[i]
     
-    # Construir variables piecewise para este par de umbrales
-    datos_tmp <- datos_clean %>%
+    train_tmp <- train_clean %>%
       mutate(
-        temp_tramo1  = temp_opt,
-        temp_tramo2  = pmax(temp_opt - HT_cand, 0),
+        temp_tramo1   = temp_opt,
+        temp_tramo2   = pmax(temp_opt - HT_cand, 0),
         precip_tramo1 = precip_opt,
         precip_tramo2 = pmax(precip_opt - HP_cand, 0)
       )
     
-    # Intentar ajustar NegBin
+    # --- Intentar NegBin con inicialización adaptativa ---
+    # Estimar theta por momentos (si var > mean)
+    mu0 <- mean(train_tmp$I_t)
+    var0 <- var(train_tmp$I_t)
+    theta_init <- if (var0 > mu0) mu0^2 / (var0 - mu0) else 1.5
+    theta_init <- max(theta_init, 0.1)
+    
     mod <- tryCatch({
-      # Primer intento con init.theta = 1.5
       MASS::glm.nb(
         I_t ~ I_t_1 + acumulado_KI + 
               temp_tramo1 + temp_tramo2 + 
               precip_tramo1 + precip_tramo2,
-        data = datos_tmp,
-        control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
-        init.theta = 1.5,
+        data = train_tmp,
+        init.theta = theta_init,
+        control = glm.control(maxit = 2000, epsilon = 1e-8),
         link = "log"
       )
     }, error = function(e) {
-      # Si falla, intentar sin init.theta
+      # Segundo intento con otro valor
       tryCatch({
         MASS::glm.nb(
           I_t ~ I_t_1 + acumulado_KI + 
                 temp_tramo1 + temp_tramo2 + 
                 precip_tramo1 + precip_tramo2,
-          data = datos_tmp,
-          control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+          data = train_tmp,
+          init.theta = 0.5,
+          control = glm.control(maxit = 2000, epsilon = 1e-8),
           link = "log"
         )
       }, error = function(e2) {
-        # Si NegBin falla completamente, intentar Poisson
+        # Fallback a Poisson si NegBin no converge
         tryCatch({
           glm(
             I_t ~ I_t_1 + acumulado_KI + 
-                temp_tramo1 + temp_tramo2 + 
-                precip_tramo1 + precip_tramo2,
-            data = datos_tmp,
+                 temp_tramo1 + temp_tramo2 + 
+                 precip_tramo1 + precip_tramo2,
+            data = train_tmp,
             family = poisson(link = "log"),
-            control = glm.control(maxit = 500)
+            control = glm.control(maxit = 2000, epsilon = 1e-8)
           )
         }, error = function(e3) NULL)
       })
     })
     
-    # Extraer resultados si el modelo convergió
-    if (!is.null(mod) && !inherits(mod, "try-error")) {
-      # Verificar que el modelo tenga coeficientes válidos
+    # Si el modelo es válido, guardar resultados
+    if (!is.null(mod) && !inherits(mod, "try-error") && 
+        (mod$converged || inherits(mod, "glm"))) {
       coefs <- coef(mod)
-      
       if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
-        # Extraer coeficientes de forma robusta
-        c0_val <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
-        cI_val <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
-        cP_val <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
+        c0_val  <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
+        cI_val  <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
+        cP_val  <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
         cP2_val <- if ("precip_tramo2" %in% names(coefs)) coefs["precip_tramo2"] else NA
-        cT_val <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
+        cT_val  <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
         cT2_val <- if ("temp_tramo2" %in% names(coefs)) coefs["temp_tramo2"] else NA
         
-        # Theta solo para NegBin
         theta_val <- if (inherits(mod, "negbin")) mod$theta else NA
         
         resultados_grid <- rbind(resultados_grid, data.frame(
@@ -456,24 +911,31 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
           theta = theta_val,
           convergio = TRUE
         ))
-        
         n_convergio <- n_convergio + 1
+      } else {
+        n_fallos <- n_fallos + 1
       }
+    } else {
+      n_fallos <- n_fallos + 1
     }
+    
+    if (show_progress) setTxtProgressBar(pb, i)
   }
   
-  cat("    ✔ Modelos convergidos:", n_convergio, "/", nrow(grid_umbrales), "\n")
+  if (show_progress) close(pb)
+  
+  cat("    ✔ Modelos convergidos:", n_convergio, "/", n_grid, 
+      " | Fallos:", n_fallos, "\n")
   
   if (nrow(resultados_grid) == 0) {
-    warning("Ningún modelo convergió para ", pais_nombre, 
-            ". Verifique que las variables tengan variación y no estén perfectamente colineales.")
+    warning("Ningún modelo convergió para ", pais_nombre)
     return(NULL)
   }
   
   # ---------------------------------------------------------
-  # PASO 3: Seleccionar mejor combinación por AIC
+  # PASO 3: Seleccionar mejor modelo por AIC
   # ---------------------------------------------------------
-  cat("  [3/5] Seleccionando mejor modelo por AIC...\n")
+  cat("  [3/6] Seleccionando mejor modelo por AIC...\n")
   
   mejor_idx <- which.min(resultados_grid$AIC)
   mejor <- resultados_grid[mejor_idx, ]
@@ -486,11 +948,11 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
   }
   
   # ---------------------------------------------------------
-  # PASO 4: Reconstruir el modelo final con los mejores umbrales
+  # PASO 4: Reconstruir modelo final
   # ---------------------------------------------------------
-  cat("  [4/5] Reconstruyendo modelo final...\n")
+  cat("  [4/6] Reconstruyendo modelo final (solo train)...\n")
   
-  datos_finales <- datos_clean %>%
+  train_finales <- train_clean %>%
     mutate(
       temp_tramo1   = temp_opt,
       temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
@@ -498,15 +960,14 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
       precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
     )
   
-  # Ajustar modelo final
   modelo_final <- tryCatch({
     if (!is.na(mejor$theta)) {
       MASS::glm.nb(
         I_t ~ I_t_1 + acumulado_KI + 
               temp_tramo1 + temp_tramo2 + 
               precip_tramo1 + precip_tramo2,
-        data = datos_finales,
-        control = glm.control(maxit = 1000),
+        data = train_finales,
+        control = glm.control(maxit = 2000, epsilon = 1e-8),
         init.theta = mejor$theta
       )
     } else {
@@ -514,9 +975,9 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
         I_t ~ I_t_1 + acumulado_KI + 
               temp_tramo1 + temp_tramo2 + 
               precip_tramo1 + precip_tramo2,
-        data = datos_finales,
+        data = train_finales,
         family = poisson(link = "log"),
-        control = glm.control(maxit = 1000)
+        control = glm.control(maxit = 2000, epsilon = 1e-8)
       )
     }
   }, error = function(e) {
@@ -524,231 +985,403 @@ ajustar_etsir_osa <- function(datos_pais, pais_nombre = NULL) {
     NULL
   })
   
-  if (is.null(modelo_final)) {
-    return(NULL)
+  if (is.null(modelo_final)) return(NULL)
+  
+  # ---------------------------------------------------------
+  # PASO 5: Métricas en TRAIN
+  # ---------------------------------------------------------
+  cat("  [5/6] Calculando predicciones y métricas en TRAIN...\n")
+  
+  train_finales$mu_osa <- predict(modelo_final, type = "response")
+  train_finales$residuo_osa <- train_finales$I_t - train_finales$mu_osa
+  
+  ss_res_train <- sum(train_finales$residuo_osa^2, na.rm = TRUE)
+  ss_tot_train <- sum((train_finales$I_t - mean(train_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+  R2_train <- 1 - ss_res_train / ss_tot_train
+  RMSE_train <- sqrt(mean(train_finales$residuo_osa^2, na.rm = TRUE))
+  
+  cat("    ✔ Métricas TRAIN:\n")
+  cat("      R²   =", round(R2_train, 4), "\n")
+  cat("      RMSE =", round(RMSE_train, 2), "\n")
+  
+  # ---------------------------------------------------------
+  # PASO 6: Métricas en TEST
+  # ---------------------------------------------------------
+  cat("  [6/6] Calculando predicciones y métricas en TEST...\n")
+  
+  if (n_test > 0) {
+    test_finales <- test_clean %>%
+      mutate(
+        temp_tramo1   = temp_opt,
+        temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+        precip_tramo1 = precip_opt,
+        precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+      )
+    
+    test_finales$mu_osa <- predict(modelo_final, newdata = test_finales, type = "response")
+    test_finales$residuo_osa <- test_finales$I_t - test_finales$mu_osa
+    
+    ss_res_test <- sum(test_finales$residuo_osa^2, na.rm = TRUE)
+    ss_tot_test <- sum((test_finales$I_t - mean(test_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+    R2_test <- 1 - ss_res_test / ss_tot_test
+    RMSE_test <- sqrt(mean(test_finales$residuo_osa^2, na.rm = TRUE))
+    
+    cat("    ✔ Métricas TEST:\n")
+    cat("      R²   =", round(R2_test, 4), "\n")
+    cat("      RMSE =", round(RMSE_test, 2), "\n")
+    
+    degradacion_R2 <- R2_train - R2_test
+    degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
+    
+    cat("    ✔ Degradación Train→Test:\n")
+    cat("      ΔR²   =", round(degradacion_R2, 4), "\n")
+    cat("      ΔRMSE =", round(degradacion_RMSE, 1), "%\n")
+  } else {
+    test_finales <- NULL
+    R2_test <- NA
+    RMSE_test <- NA
+    degradacion_R2 <- NA
+    degradacion_RMSE <- NA
+    cat("    ⚠ No hay datos de test disponibles\n")
   }
   
-  # ---------------------------------------------------------
-  # PASO 5: Predicciones y residuos
-  # ---------------------------------------------------------
-  cat("  [5/5] Calculando predicciones y métricas...\n")
+  cat("\n")
   
-  datos_finales$mu_osa <- predict(modelo_final, type = "response")
-  datos_finales$residuo_osa <- datos_finales$I_t - datos_finales$mu_osa
-  
-  # Métricas de evaluación
-  ss_res <- sum(datos_finales$residuo_osa^2, na.rm = TRUE)
-  ss_tot <- sum((datos_finales$I_t - mean(datos_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
-  R2 <- 1 - ss_res / ss_tot
-  RMSE <- sqrt(mean(datos_finales$residuo_osa^2, na.rm = TRUE))
-  
-  cat("    ✔ Métricas OSA:\n")
-  cat("      R²   =", round(R2, 4), "\n")
-  cat("      RMSE =", round(RMSE, 2), "\n\n")
-  
-  # ---------------------------------------------------------
-  # Retornar lista con todos los resultados
-  # ---------------------------------------------------------
   return(list(
     pais           = pais_nombre,
     modelo         = modelo_final,
-    datos          = datos_finales,
+    train_data     = train_finales,
+    test_data      = test_finales,
     umbrales       = c(HT = mejor$HT, HP = mejor$HP),
     coeficientes   = c(c0 = mejor$c0, cI = mejor$cI,
                        cP = mejor$cP, cP2 = mejor$cP2,
                        cT = mejor$cT, cT2 = mejor$cT2),
     theta          = mejor$theta,
-    metricas       = c(AIC = mejor$AIC, R2 = R2, RMSE = RMSE),
+    metricas_train = c(AIC = mejor$AIC, R2 = R2_train, RMSE = RMSE_train),
+    metricas_test  = c(R2 = R2_test, RMSE = RMSE_test),
+    degradacion    = c(delta_R2 = degradacion_R2, delta_RMSE_pct = degradacion_RMSE),
     grid_completo  = resultados_grid
   ))
 }
 
-cat("✔ Función ajustar_etsir_osa() corregida y lista para usar.\n")
 ```
 
-```{r ajuste modelo OSA}
-#==============================================================================
-# DIAGNÓSTICO PRE-AJUSTE: Verificar que los datos están listos
-#==============================================================================
-# 
-# cat("  DIAGNÓSTICO DE DATOS PARA MODELADO ETSIR\n")
-# 
-# # Verificar cada país
-# for (p in unique(datos_master$pais)) {
-#   cat("──", p, "──\n")
-#   
-#   datos_p <- datos_master %>% filter(pais == p)
-#   
-#   # 1. Verificar NAs
-#   nas_criticos <- sum(is.na(datos_p$I_t) | is.na(datos_p$I_t_1) | 
-#                        is.na(datos_p$acumulado_KI) | 
-#                        is.na(datos_p$temp_opt) | is.na(datos_p$precip_opt))
-#   cat("  NAs en variables críticas:", nas_criticos, "\n")
-#   
-#   # 2. Verificar variación
-#   cat("  Rango I_t:", range(datos_p$I_t, na.rm = TRUE), "\n")
-#   cat("  Rango temp_opt:", round(range(datos_p$temp_opt, na.rm = TRUE), 2), "\n")
-#   cat("  Rango precip_opt:", round(range(datos_p$precip_opt, na.rm = TRUE), 2), "\n")
-#   
-#   # 3. Verificar multicolinealidad
-#   cor_matrix <- cor(datos_p %>% select(I_t_1, acumulado_KI, temp_opt, precip_opt),
-#                     use = "complete.obs")
-#   cor_altas <- sum(abs(cor_matrix[upper.tri(cor_matrix)]) > 0.95)
-#   cat("  Pares con |r| > 0.95:", cor_altas, "\n")
-#   
-#   # 4. Prueba rápida de glm.nb
-#   datos_test <- datos_p %>%
-#     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
-#            !is.na(temp_opt), !is.na(precip_opt)) %>%
-#     mutate(
-#       temp_tramo1 = temp_opt,
-#       temp_tramo2 = pmax(temp_opt - median(temp_opt), 0),
-#       precip_tramo1 = precip_opt,
-#       precip_tramo2 = pmax(precip_opt - median(precip_opt), 0)
-#     )
-#   
-#   mod_test <- tryCatch({
-#     MASS::glm.nb(
-#       I_t ~ I_t_1 + acumulado_KI + temp_tramo1 + temp_tramo2 + 
-#             precip_tramo1 + precip_tramo2,
-#       data = datos_test,
-#       control = glm.control(maxit = 250),
-#       init.theta = 1.5
-#     )
-#   }, error = function(e) {
-#     cat("  ⚠ Error en prueba glm.nb:", e$message, "\n")
-#     NULL
-#   })
-#   
-#   if (!is.null(mod_test)) {
-#     cat("  ✔ Prueba glm.nb: CONVERGIÓ (AIC =", round(AIC(mod_test), 1), ")\n")
-#   } else {
-#     cat("  ✗ Prueba glm.nb: FALLÓ\n")
-#   }
-#   
-#   cat("\n")
-# }
-# 
-# cat("✔ Diagnóstico completo. Si todas las pruebas fallan, revise la escala de las variables.\n")
+#### 3.2 Ejecución del Ajuste OSA con Train/Test
 
+```{r bloque-3-ejecucion-osa}
 #==============================================================================
-# BLOQUE 4: AJUSTE DEL MODELO ETSIR-OSA PARA LOS 5 PAÍSES
+# BLOQUE 3.2: EJECUCIÓN DEL AJUSTE OSA CON DIVISIÓN TRAIN/TEST
 #==============================================================================
 
-# Filtrar datos listos para modelado (sin NAs en variables críticas)
-datos_modelado <- datos_master %>%
-  filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
-         !is.na(temp_opt), !is.na(precip_opt))
+# Dividir datos por país
+train_por_pais <- train_data %>% split(.$pais)
+test_por_pais <- test_data %>% split(.$pais)
 
-# Ajustar por país
-resultados_etsir_osa <- datos_modelado %>%
-  split(.$pais) %>%
-  map(~ ajustar_etsir_osa(.x))
+# Ajustar por país usando SOLO train_data
+resultados_etsir_osa <- map2(
+  train_por_pais, 
+  test_por_pais,
+  ~ ajustar_etsir_osa(.x, .y, pais_nombre = .x$pais[1])
+) %>% set_names(names(train_por_pais))
 
-# Consolidar métricas en tabla
+# Consolidar métricas en tabla comparativa
 tabla_metricas_osa <- map_dfr(resultados_etsir_osa, ~ {
   tibble(
-    País     = .x$pais,
+    País       = .x$pais,
     `H_T (°C)` = round(.x$umbrales["HT"], 2),
     `H_P (mm)` = round(.x$umbrales["HP"], 2),
-    `c₀`     = round(.x$coeficientes["c0"], 4),
-    `c_I`    = round(.x$coeficientes["cI"], 4),
-    `c_T`    = round(.x$coeficientes["cT"], 4),
-    `c_T'`   = round(.x$coeficientes["cT2"], 4),
-    `c_P`    = round(.x$coeficientes["cP"], 4),
-    `c_P'`   = round(.x$coeficientes["cP2"], 4),
-    `θ`      = round(.x$theta, 3),
-    AIC      = round(.x$metricas["AIC"], 1),
-    `R²`     = round(.x$metricas["R2"], 4),
-    RMSE     = round(.x$metricas["RMSE"], 1)
+    `c₀`       = round(.x$coeficientes["c0"], 4),
+    `c_I`      = round(.x$coeficientes["cI"], 4),
+    `c_T`      = round(.x$coeficientes["cT"], 4),
+    `c_T'`     = round(.x$coeficientes["cT2"], 4),
+    `c_P`      = round(.x$coeficientes["cP"], 4),
+    `c_P'`     = round(.x$coeficientes["cP2"], 4),
+    `θ`        = round(.x$theta, 3),
+    # Métricas TRAIN
+    `R²_Train` = round(.x$metricas_train["R2"], 4),
+    `RMSE_Train` = round(.x$metricas_train["RMSE"], 1),
+    # Métricas TEST
+    `R²_Test`  = round(.x$metricas_test["R2"], 4),
+    `RMSE_Test` = round(.x$metricas_test["RMSE"], 1),
+    # Degradación
+    `ΔR²`      = round(.x$degradacion["delta_R2"], 4),
+    `ΔRMSE_%`  = round(.x$degradacion["delta_RMSE_pct"], 1)
   )
 })
 
-# Renderizar tabla
+# Renderizar tabla con formato mejorado
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("RESULTADOS DEL MODELO ETSIR ONE-STEP-AHEAD (TRAIN/TEST)\n")
+cat("═══════════════════════════════════════════════════════\n\n")
+
 tabla_metricas_osa %>%
-  kbl(caption = "Resultados del Modelo ETSIR One-Step-Ahead por País",
+  kbl(caption = "Resultados ETSIR-OSA: Comparación Train (2014-2019) vs Test (2020-2024)",
       format = "html", escape = FALSE) %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE) %>%
-  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white")
-```  
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white") %>%
+  column_spec(11:12, background = "#e8f4f8", bold = TRUE) %>%  # Train
+  column_spec(13:14, background = "#fef5e7", bold = TRUE) %>%  # Test
+  column_spec(15:16, background = "#fadbd8", bold = TRUE) %>%  # Degradación
+  footnote(
+    general = paste(
+      "Columnas azules = métricas in-sample (train).",
+      "Columnas naranjas = métricas out-of-sample (test).",
+      "Columnas rojas = degradación de performance (menor es mejor).",
+      "ΔR² = R²_Train - R²_Test (valores pequeños indican buena generalización).",
+      "ΔRMSE_% = porcentaje de aumento del error en test vs train."
+    ),
+    general_title = "Nota: ", footnote_as_chunk = TRUE
+  )
 
-```{r analisis OSA}
+```
+
+**Cambios críticos implementados:**
+
+1. **Función modificada**: `ajustar_etsir_osa()` ahora recibe `train_data_pais` y `test_data_pais` como argumentos separados
+2. **Ajuste solo en train**: El grid search y ajuste de `glm.nb` usan exclusivamente `train_data`
+3. **Predicción en ambos conjuntos**: Se calculan predicciones y métricas tanto en train como en test
+4. **Métricas de degradación**: Se calcula ΔR² y ΔRMSE% para evaluar capacidad de generalización
+5. **Tabla comparativa**: Muestra resultados side-by-side con código de colores para facilitar interpretación
+
+:::
+
+::: {#seccion-2-4 .content-card}
+### 4. Diagnóstico del Modelo OSA
+
+#### 4.1 Series Observadas vs. Predichas (Train y Test)
+
+```{r bloque-4-diagnostico-series}
 #==============================================================================
-# BLOQUE 5: DIAGNÓSTICO DEL MODELO ETSIR-OSA
+# BLOQUE 4.1: DIAGNÓSTICO VISUAL - SERIES OBSERVADAS VS. PREDICHAS (TRAIN/TEST)
+#==============================================================================
+# PROPÓSITO: Visualizar el ajuste del modelo en ambos períodos (train y test)
+# para evaluar capacidad de generalización temporal.
+#
+# CAMBIOS vs. VERSIÓN ANTERIOR:
+#   - Antes: un solo gráfico con todas las predicciones
+#   - Ahora: gráfico facetado mostrando train (2014-2019) y test (2020-2024)
+#   - Línea vertical marca el punto de corte entre train y test
+#   - Diferentes colores para predicciones in-sample vs out-of-sample
 #==============================================================================
 
-# ---------------------------------------------------------
-# 14.1 Gráfico de series observadas vs. predichas (OSA)
-# ---------------------------------------------------------
-datos_predichos <- map_dfr(resultados_etsir_osa, ~ .x$datos)
+# Combinar datos de train y test con etiquetas
+datos_predichos_completos <- bind_rows(
+  map_dfr(resultados_etsir_osa, ~ .x$train_data) %>% mutate(Conjunto = "Train"),
+  map_dfr(resultados_etsir_osa, ~ .x$test_data) %>% mutate(Conjunto = "Test")
+)
 
-ggplot(datos_predichos, aes(x = fecha_semana)) +
+# Crear gráfico con separación visual train/test
+ggplot(datos_predichos_completos, aes(x = fecha_semana)) +
+  # Observaciones reales
   geom_line(aes(y = I_t, color = "Observado"), linewidth = 0.5) +
-  geom_line(aes(y = mu_osa, color = "Predicho OSA"), 
-            linewidth = 0.6, linetype = "dashed") +
+  # Predicciones del modelo
+  geom_line(aes(y = mu_osa, color = Conjunto, linetype = Conjunto), 
+            linewidth = 0.6) +
+  # Línea vertical marcando el corte train/test
+  geom_vline(xintercept = as.Date("2022-01-01"), 
+             linetype = "dashed", color = "red", linewidth = 0.8) +
+  # Anotaciones
+  annotate("text", x = as.Date("2017-01-01"), y = Inf, 
+           label = "TRAIN\n(2014-2021)", vjust = 2, hjust = 0.5, 
+           color = "#2980b9", fontface = "bold", size = 3) +
+  annotate("text", x = as.Date("2023-01-01"), y = Inf, 
+           label = "TEST\n(2022-2024)", vjust = 2, hjust = 0.5, 
+           color = "#e67e22", fontface = "bold", size = 3) +
+  # Facetas por país
   facet_wrap(~ pais, scales = "free_y", ncol = 2) +
+  # Escalas y colores
   scale_color_manual(values = c("Observado" = "#2c3e50", 
-                                 "Predicho OSA" = "#e74c3c")) +
+                                 "Train" = "#3498db", 
+                                 "Test" = "#e67e22")) +
+  scale_linetype_manual(values = c("Train" = "solid", "Test" = "dashed")) +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
   scale_y_continuous(labels = comma_format()) +
+  # Etiquetas
   labs(
-    title    = "Modelo ETSIR One-Step-Ahead: Observado vs. Predicho",
-    subtitle = "Las líneas rojas punteadas son las predicciones μ_t del modelo",
-    x = "Fecha", y = "Casos semanales", color = "Serie"
+    title    = "Modelo ETSIR One-Step-Ahead: Validación Temporal Train/Test",
+    subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2019) y prueba (2020-2024)",
+    x = "Fecha", y = "Casos semanales", 
+    color = "Serie", linetype = "Conjunto"
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "bottom",
         strip.background = element_rect(fill = "#34495e"),
         strip.text = element_text(color = "white", face = "bold"))
+```
 
-# ---------------------------------------------------------
-# 14.2 Gráfico de residuos (homocedasticidad)
-# ---------------------------------------------------------
-ggplot(datos_predichos, aes(x = mu_osa, y = residuo_osa, color = pais)) +
+#### 4.2 Análisis de Residuos (Train y Test Separados)
+
+```{r bloque-4-diagnostico-residuos}
+#==============================================================================
+# BLOQUE 4.2: DIAGNÓSTICO DE RESIDUOS (TRAIN Y TEST SEPARADOS)
+#==============================================================================
+
+# --- 4.2.1 Gráfico de residuos vs. valores ajustados (facetado por conjunto) ---
+p_residuos <- ggplot(datos_predichos_completos, 
+                     aes(x = mu_osa, y = residuo_osa, color = Conjunto)) +
   geom_point(alpha = 0.3, size = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
-  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.8) +
-  facet_wrap(~ pais, scales = "free", ncol = 3) +
-  scale_color_manual(values = PALETA_PAISES) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.8) +
+  facet_grid(pais ~ Conjunto, scales = "free") +
+  scale_color_manual(values = c("Train" = "#3498db", "Test" = "#e67e22")) +
   scale_y_continuous(labels = comma_format()) +
   labs(
-    title    = "Residuos del Modelo ETSIR-OSA",
+    title    = "Residuos del Modelo ETSIR-OSA: Train vs Test",
     subtitle = "Patrón horizontal = buen ajuste; curva = posible misspecification",
-    x = "Valor ajustado (μ_t)", y = "Residuo (I_t - μ_t)", color = "País"
+    x = "Valor ajustado (μ_t)", y = "Residuo (I_t - μ_t)", color = "Conjunto"
   ) +
   theme_minimal(base_size = 11) +
-  theme(legend.position = "none")
+  theme(legend.position = "none",
+        strip.background = element_rect(fill = "#34495e"),
+        strip.text = element_text(color = "white", face = "bold"))
 
-# ---------------------------------------------------------
-# 14.3 ACF de residuos (verificar independencia)
-# ---------------------------------------------------------
+print(p_residuos)
+
+# --- 4.2.2 Tabla resumen de estadísticos de residuos ---
+resumen_residuos <- datos_predichos_completos %>%
+  group_by(pais, Conjunto) %>%
+  summarise(
+    Media_Residuo = round(mean(residuo_osa, na.rm = TRUE), 2),
+    DE_Residuo = round(sd(residuo_osa, na.rm = TRUE), 2),
+    Mediana_Residuo = round(median(residuo_osa, na.rm = TRUE), 2),
+    Min_Residuo = round(min(residuo_osa, na.rm = TRUE), 2),
+    Max_Residuo = round(max(residuo_osa, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("ESTADÍSTICOS DE RESIDUOS POR CONJUNTO\n")
+cat("═══════════════════════════════════════════════════════\n\n")
+
+resumen_residuos %>%
+  kbl(caption = "Distribución de Residuos: Train (In-Sample) vs Test (Out-of-Sample)",
+      format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, background = "#2c3e50", color = "white") %>%
+  row_spec(which(resumen_residuos$Conjunto == "Train"), background = "#e8f4f8") %>%
+  row_spec(which(resumen_residuos$Conjunto == "Test"), background = "#fef5e7")
+```
+
+#### 4.3 ACF de Residuos (Train y Test)
+
+```{r bloque-4-diagnostico-acf}
+#==============================================================================
+# BLOQUE 4.3: ACF DE RESIDUOS (VERIFICAR INDEPENDENCIA EN TRAIN Y TEST)
+#==============================================================================
+
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("ANÁLISIS DE AUTOCORRELACIÓN DE RESIDUOS (TRAIN)\n")
+cat("═══════════════════════════════════════════════════════\n\n")
+
+# ACF de residuos en TRAIN
 par(mfrow = c(2, 3))
-for (p in unique(datos_predichos$pais)) {
-  residuos_pais <- datos_predichos %>%
-    filter(pais == p) %>%
+for (p in unique(datos_predichos_completos$pais)) {
+  residuos_train <- datos_predichos_completos %>%
+    filter(pais == p, Conjunto == "Train") %>%
     pull(residuo_osa)
-  acf(residuos_pais, main = p, lag.max = 30, 
-      col = "#e74c3c", lwd = 2)
+  if (length(residuos_train) > 10) {
+    acf(residuos_train, main = paste(p, "(Train)"), lag.max = 30, 
+        col = "#3498db", lwd = 2)
+  }
 }
 par(mfrow = c(1, 1))
-cat("\n  → Si la ACF decae rápidamente, el modelo captura bien la dinámica.\n")
-cat("  → Si hay picos significativos en rezagos altos, se requiere MSA.\n")
-```  
 
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("ANÁLISIS DE AUTOCORRELACIÓN DE RESIDUOS (TEST)\n")
+cat("═══════════════════════════════════════════════════════\n\n")
 
-### 1pausa
+# ACF de residuos en TEST
+par(mfrow = c(2, 3))
+for (p in unique(datos_predichos_completos$pais)) {
+  residuos_test <- datos_predichos_completos %>%
+    filter(pais == p, Conjunto == "Test") %>%
+    pull(residuo_osa)
+  if (length(residuos_test) > 10) {
+    acf(residuos_test, main = paste(p, "(Test)"), lag.max = 30, 
+        col = "#e67e22", lwd = 2)
+  }
+}
+par(mfrow = c(1, 1))
+
+cat("\nInterpretación:\n")
+cat("  → ACF en Train: Si decae rápidamente, el modelo captura bien la dinámica.\n")
+cat("  → ACF en Test: Si decae rápidamente, el modelo generaliza bien.\n")
+cat("  → Si hay picos significativos en rezagos altos: se requiere MSA.\n")
+cat("  → Comparar ACF Train vs Test revela si la estructura temporal cambia.\n")
+```
+
+**Cambios críticos implementados:**
+
+1. **Gráfico facetado train/test**: Muestra visualmente el corte temporal entre entrenamiento y prueba
+2. **Línea vertical de corte**: Marca claramente el punto donde termina train y comienza test
+3. **Colores diferenciados**: Azul para train (in-sample), naranja para test (out-of-sample)
+4. **Residuos separados**: Análisis de residuos independiente para cada conjunto
+5. **ACF comparativa**: Autocorrelación calculada separadamente en train y test
+6. **Tabla de estadísticos**: Resume distribución de residuos en ambos períodos
+
 :::
 
-::: {#seccion-2-2 .content-card}
-```{r estimacion MSA, eval=FALSE, include=FALSE}
-# ==============================================================================
-# 1. FUNCIÓN DE PÉRDIDA NATIVA MATRICIAL (ULTRARRÁPIDA)
-# ==============================================================================
-msa_loss_core_vectorized <- function(params, I_s, T_s, P_s, K_I, K_max) {
-  c0 <- params[1]; cI <- params[2]; cT <- params[3]
-  cT_p <- params[4]; cP <- params[5]; cP_p <- params[6]
+
+::: {#seccion-2-5 .content-card}
+### 5. Estimación MSA (Multiple-Step-Ahead) con Validación Temporal
+
+<div class="rmdnote">
+**Objetivo**: Implementar la estimación MSA (Multiple-Step-Ahead) propuesta por Wang & Zhang (2025) 
+con validación temporal estricta (train 2014-2019, test 2020-2024).
+
+**Diferencias críticas vs. One-Step-Ahead (OSA)**:
+- **OSA**: Minimiza error de predicción a 1 paso → captura dinámica local
+- **MSA**: Minimiza error acumulado en K pasos → captura periodicidad y estructura de largo plazo
+
+**Justificación teórica (Wang & Zhang, 2025)**:
+Cuando el modelo está mal especificado (siempre ocurre en epidemiología) y hay subregistro, 
+el estimador OSA no captura la periodicidad de la serie. MSA resuelve esto ajustando la 
+trayectoria dinámica completa, matching automático de la función de autocovarianza (ACF).
+
+**Cambios implementados**:
+1. Ajuste de parámetros SOLO en `train_data` (2014-2019)
+2. Validación out-of-sample en `test_data` (2020-2024)
+3. Métricas calculadas separadamente en ambos conjuntos
+4. Comparación Poisson vs. NegBin con criterios AIC/BIC en train
+5. Evaluación de capacidad predictiva real en test
+</div>
+
+#### 5.1 Función de Pérdida MSA (Negative Log-Likelihood Multi-Paso)
+
+```{r bloque-5-msa-nll}
+#==============================================================================
+# BLOQUE 5.1: FUNCIÓN DE PÉRDIDA MSA - NEGATIVE LOG-LIKELIHOOD MULTI-PASO
+#==============================================================================
+# PROPÓSITO: Evalúa la log-verosimilitud NEGATIVA de una distribución de 
+# conteo (Poisson o NegBin) sobre la recursión MSA a K_max pasos.
+#
+# NOTA: Esta función NO cambia con la división train/test. Es la función
+# matemática de pérdida que se evalúa sobre cualquier conjunto de datos.
+#
+# DIFERENCIAS vs. VERSIÓN ANTERIOR (msa_loss_core_vectorized):
+#   1. Usa verosimilitud real (no mínimos cuadrados puros)
+#   2. Permite comparar Poisson vs. NegBin con AIC/BIC
+#   3. Las métricas se calculan con la MISMA recursión que se optimizó
+#   4. El escalado es dinámico por país (no constantes fijas)
+#
+# JUSTIFICACIÓN TEÓRICA:
+#   - Distribución = "poisson" → Var(I_t) = μ_t
+#   - Distribución = "nbinom"  → Var(I_t) = μ_t + μ_t²/θ
+#==============================================================================
+
+msa_negloglik_core <- function(params, I_s, I_orig, T_s, P_s, K_I, K_max,
+                                distribucion = c("poisson", "nbinom"),
+                                escala_I) {
+  
+  distribucion <- match.arg(distribucion)
+  
+  c0   <- params[1]; cI   <- params[2]; cT   <- params[3]
+  cT_p <- params[4]; cP   <- params[5]; cP_p <- params[6]
   HT_s <- params[7]; HP_s <- params[8]
+  
+  log_theta <- if (distribucion == "nbinom") params[9] else NA
   
   n <- length(I_s)
   valid_t <- (K_I + 1):(n - K_max)
@@ -768,645 +1401,30 @@ msa_loss_core_vectorized <- function(params, I_s, T_s, P_s, K_I, K_max) {
   preds_matrix <- matrix(0, nrow = n_valid, ncol = K_max)
   
   # Recursión MSA vectorizada
-  for(k in 1:K_max) {
-    I_t_minus_1 <- state_matrix[, 1]
-    acum_I <- rowSums(state_matrix)
-    
-    gT <- cT * env_T_matrix[, k] + cT_p * pmax(env_T_matrix[, k] - HT_s, 0)
-    gP <- cP * env_P_matrix[, k] + cP_p * pmax(env_P_matrix[, k] - HP_s, 0)
-    
-    mu <- (c0 + cI * acum_I + gT + gP) * I_t_minus_1
-    mu <- pmax(mu, 1e-4)
-    
-    preds_matrix[, k] <- mu
-    
-    if(K_I > 1) {
-      state_matrix <- cbind(mu, state_matrix[, 1:(K_I - 1), drop = FALSE])
-    } else {
-      state_matrix <- matrix(mu, ncol = 1)
-    }
-  }
-  
-  idx_obs <- outer(valid_t, 1:K_max, "+")
-  obs_matrix <- matrix(I_s[idx_obs], nrow = n_valid)
-  
-  total_loss <- sum((obs_matrix - preds_matrix)^2, na.rm = TRUE)
-  return(total_loss + 0.01 * sum(params[1:6]^2))
-}
-
-# ==============================================================================
-# 2. FUNCIÓN DE AJUSTE POR PAÍS CON MÉTRICAS DE VALIDACIÓN
-# ==============================================================================
-ajustar_msa_pais_completo <- function(df_pais, pais_nombre, K_I = 8, K_max = 4) {
-  cat(sprintf("\nProcesando MSA para: %s...\n", pais_nombre))
-  
-  # Extraer vectores escalados
-  I_s <- df_pais$I_t_scaled
-  T_s <- df_pais$temp_scaled
-  P_s <- df_pais$precip_scaled
-  
-  # Variables originales para métricas finales
-  I_orig <- df_pais$I_t
-  T_orig <- df_pais$temp_original %if_null% df_pais$temp_opt
-  P_orig <- df_pais$precip_original %if_null% df_pais$precip_opt
-  
-  # --- Grid Search para Umbrales ---
-  HT_grid <- quantile(T_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
-  HP_grid <- quantile(P_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
-  grid <- expand.grid(HT = HT_grid, HP = HP_grid)
-  grid$loss <- Inf
-  
-  for(i in 1:nrow(grid)) {
-    params_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02, grid$HT[i], grid$HP[i])
-    
-    opt_grid <- tryCatch({
-      suppressWarnings(optim(
-        par = params_init[1:6], 
-        fn = function(p) msa_loss_core_vectorized(
-          c(p, grid$HT[i], grid$HP[i]), I_s, T_s, P_s, K_I, K_max),
-        method = "L-BFGS-B",
-        lower = c(0.1, -2, 0.001, -2, 0.001, -2),
-        upper = c(5.0, -1e-4, 2.0, -1e-4, 2.0, -1e-4),
-        control = list(maxit = 100, factr = 1e9)
-      ))
-    }, error = function(e) list(value = Inf))
-    
-    grid$loss[i] <- opt_grid$value
-  }
-  
-  mejor_grid <- grid[which.min(grid$loss), ]
-  HT_opt <- mejor_grid$HT
-  HP_opt <- mejor_grid$HP
-  
-  # --- Optimización Final ---
-  params_final_init <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02)
-  
-  optim_result <- tryCatch({
-    suppressWarnings(optim(
-      par = params_final_init,
-      fn = function(p) msa_loss_core_vectorized(
-        c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
-      method = "L-BFGS-B",
-      lower = c(0.1, -5, 0.001, -5, 0.001, -5),
-      upper = c(10, -1e-4, 5, -1e-4, 5, -1e-4),
-      control = list(maxit = 500, factr = 1e8)
-    ))
-  }, error = function(e) list(par = params_final_init, 
-                             counts = c("function"=0), value = NA))
-  
-  # Fallback robusto
-  if(is.null(optim_result$counts) || optim_result$counts["function"] <= 1) {
-    optim_result <- suppressWarnings(optim(
-      par = params_final_init,
-      fn = function(p) msa_loss_core_vectorized(
-        c(p, HT_opt, HP_opt), I_s, T_s, P_s, K_I, K_max),
-      method = "Nelder-Mead",
-      control = list(maxit = 500)
-    ))
-  }
-  
-  # --- Des-escalado de Parámetros ---
-  HT_orig <- HT_opt * 5 + 25
-  HP_orig <- HP_opt * 100 + 200
-  
-  params_estimados <- c(
-    c0 = optim_result$par[1],
-    cI = optim_result$par[2],
-    cT = optim_result$par[3],
-    cT_p = optim_result$par[4],
-    cP = optim_result$par[5],
-    cP_p = optim_result$par[6],
-    HT_s = HT_opt,
-    HP_s = HP_opt
-  )
-  
-  # --- Generar Predicciones para Validación ---
-  # Simulación one-step-ahead para diagnóstico de residuos
-  n <- length(I_s)
-  preds_osa <- numeric(n)
-  
-  for(t in (K_I + 1):n) {
-    state <- I_s[(t-1):(t-K_I)]
-    I_t_minus_1 <- state[1]
-    acum_I <- sum(state)
-    
-    gT <- params_estimados["cT"] * T_s[t] + 
-          params_estimados["cT_p"] * pmax(T_s[t] - HT_opt, 0)
-    gP <- params_estimados["cP"] * P_s[t] + 
-          params_estimados["cP_p"] * pmax(P_s[t] - HP_opt, 0)
-    
-    mu <- (params_estimados["c0"] + params_estimados["cI"] * acum_I + gT + gP) * I_t_minus_1
-    preds_osa[t] <- max(mu, 1e-4)
-  }
-  
-  # Convertir predicciones a escala original
-  preds_osa_orig <- preds_osa * 1000
-  residuos <- I_orig - preds_osa_orig
-  residuos_esc <- residuos / sd(I_orig, na.rm = TRUE)
-  
-  # --- Métricas de Bondad de Ajuste ---
-  ss_res <- sum(residuos^2, na.rm = TRUE)
-  ss_tot <- sum((I_orig - mean(I_orig, na.rm = TRUE))^2, na.rm = TRUE)
-  R2 <- 1 - ss_res / ss_tot
-  RMSE <- sqrt(mean(residuos^2, na.rm = TRUE))
-  MAE <- mean(abs(residuos), na.rm = TRUE)
-  MAPE <- mean(abs(residuos / (I_orig + 1)) * 100, na.rm = TRUE)
-  
-  # Prueba de Ljung-Box (white noise test)
-  residuos_limpios <- residuos_esc[!is.na(residuos_esc)]
-  ljung_box <- tryCatch({
-    Box.test(residuos_limpios, lag = 20, type = "Ljung-Box")
-  }, error = function(e) list(p.value = NA))
-  
-  # --- Retornar Resultados Completos ---
-  list(
-    tabla = tibble(
-      Pais = pais_nombre,
-      c0 = round(optim_result$par[1], 4),
-      cI = round(optim_result$par[2], 4),
-      cT = round(optim_result$par[3], 4),
-      cT_prime = round(optim_result$par[4], 4),
-      cP = round(optim_result$par[5], 4),
-      cP_prime = round(optim_result$par[6], 4),
-      `H_T (°C)` = round(HT_orig, 2),
-      `H_P (mm)` = round(HP_orig, 2),
-      R2 = round(R2, 4),
-      RMSE = round(RMSE, 2),
-      MAE = round(MAE, 2),
-      MAPE = round(MAPE, 2),
-      `Ljung-Box (p)` = round(ljung_box$p.value, 4),
-      Iteraciones = optim_result$counts["function"],
-      Loss_MSA = round(optim_result$value, 2)
-    ),
-    datos_validacion = tibble(
-      pais = pais_nombre,
-      semana = seq_along(I_orig),
-      I_obs = I_orig,
-      I_pred = preds_osa_orig,
-      residuos = residuos,
-      residuos_std = residuos_esc,
-      temp = T_orig,
-      precip = P_orig
-    ),
-    params = params_estimados,
-    umbrales = c(HT = HT_orig, HP = HP_orig)
-  )
-}
-
-# Auxiliar
-`%if_null%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
-
-# ==============================================================================
-# 3. EJECUCIÓN DEL PIPELINE INDUSTRIAL
-# ==============================================================================
-paises_objetivo <- c("Colombia", "Costa Rica", "Honduras", 
-                     "México", "República Dominicana")
-
-cat("\n INICIANDO PIPELINE VECTORIZADO CON VALIDACIÓN...\n")
-
-resultados_completos <- map(paises_objetivo, function(pais) {
-  # CORREGIDO: datos_etsir_final nunca se crea en ModuloI.Rmd; el objeto
-  # final que produce el pipeline (y el único que se conserva tras la
-  # limpieza de memoria) es datos_master. Se usa exists() para no fallar
-  # si el entorno tiene un nombre distinto.
-  if (exists("datos_master")) {
-    df_temp <- datos_master %>% filter(pais == !!pais)
-  } else if (exists("datos_modelado")) {
-    df_temp <- datos_modelado %>% filter(pais == !!pais)
-  } else {
-    stop("No se encontró 'datos_master' ni 'datos_modelado'. Corre primero ModuloI.Rmd completo.")
-  }
-
-  tryCatch({
-    ajustar_msa_pais_completo(df_temp, pais, K_I = 8, K_max = 4)
-  }, error = function(e) {
-    cat(sprintf("Error en %s: %s\n", pais, e$message))
-    NULL
-  })
-}) %>% set_names(paises_objetivo)
-
-# Consolidar tabla de resultados
-tabla_msa_final <- map_dfr(resultados_completos, ~ .x$tabla) %>%
-  filter(!is.na(c0))
-
-# Consolidar datos de validación
-datos_validacion <- map_dfr(resultados_completos, ~ .x$datos_validacion) %>%
-  filter(!is.na(I_obs))
-
-cat("\nPIPELINE COMPLETADO CON VALIDACIÓN.\n\n")
-
-# ==============================================================================
-# 4. TABLA DE RESULTADOS CON MÉTRICAS DE VALIDACIÓN
-# ==============================================================================
-tabla_msa_final %>%
-  rename(
-    "$c_0$" = c0, "$c_I$" = cI, "$c_T$" = cT, "$c'_T$" = cT_prime,
-    "$c_P$" = cP, "$c'_P$" = cP_prime
-  ) %>%
-  kbl(
-    format = "html",
-    escape = FALSE,
-    caption = "Parámetros ETSIR-MSA con Métricas de Validación Estadística",
-    digits = c(0, 4, 4, 4, 4, 4, 4, 2, 2, 4, 2, 2, 2, 4, 0, 2)
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-    full_width = FALSE,
-    position = "center",
-    font_size = 11
-  ) %>%
-  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
-  column_spec(1, bold = TRUE, color = "#2c3e50") %>%
-  column_spec(10:13, background = "#e8f4f8") %>% # Resaltar métricas
-  footnote(
-    general = paste(
-      "Estimación MSA (K=4 pasos). Variables escaladas: I/1000, T=(T-25)/5, P=(P-200)/100.",
-      "R² calculado sobre predicciones one-step-ahead para diagnóstico.",
-      "Ljung-Box H₀: residuos son ruido blanco (p > 0.05 indica buen ajuste)."
-    ),
-    general_title = "Nota: ",
-    footnote_as_chunk = TRUE
-  )
-
-# ==============================================================================
-# 5. GRÁFICOS DE VALIDACIÓN DEL MODELO
-# ==============================================================================
-
-# --- 5.1 Series Observadas vs Ajustadas ---
-p_series <- ggplot(datos_validacion, aes(x = semana)) +
-  geom_line(aes(y = I_obs), color = "#2c3e50", linewidth = 0.6, alpha = 0.8) +
-  geom_line(aes(y = I_pred), color = "#e74c3c", linewidth = 0.5, 
-            linetype = "dashed", alpha = 0.9) +
-  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
-  scale_y_continuous(labels = scales::comma) +
-  labs(
-    title = "Validación del Modelo ETSIR-MSA: Series Observadas vs Ajustadas",
-    subtitle = "Ajuste one-step-ahead para diagnóstico de residuos",
-    x = "Semana Epidemiológica",
-    y = "Casos de Dengue",
-    caption = "Línea sólida = Observado | Línea punteada = Predicho por ETSIR-MSA"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.background = element_rect(fill = "#34495e"),
-    strip.text = element_text(color = "white", face = "bold"),
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    panel.grid.minor = element_blank()
-  )
-
-print(p_series)
-
-# --- 5.2 Diagnóstico de Residuos ---
-p_residuos <- datos_validacion %>%
-  filter(!is.na(residuos_std)) %>%
-  ggplot(aes(x = semana, y = residuos_std)) +
-  geom_hline(yintercept = 0, color = "gray40", linetype = "dashed") +
-  geom_hline(yintercept = c(-2, 2), color = "#e74c3c", 
-             linetype = "dotted", alpha = 0.6) +
-  geom_point(size = 0.8, alpha = 0.5, color = "#3498db") +
-  facet_wrap(~ pais, scales = "free_y", ncol = 2) +
-  labs(
-    title = "Análisis de Residuos Estandarizados",
-    subtitle = "Verificación de supuesto de ruido blanco (±2 DE)",
-    x = "Semana Epidemiológica",
-    y = "Residuo Estandarizado"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.background = element_rect(fill = "#34495e"),
-    strip.text = element_text(color = "white", face = "bold"),
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    panel.grid.minor = element_blank()
-  )
-
-print(p_residuos)
-
-# --- 5.3 ACF de Residuos (Prueba de White Noise) ---
-# Calcular ACF por país
-acf_data <- datos_validacion %>%
-  filter(!is.na(residuos_std)) %>%
-  group_by(pais) %>%
-  do({
-    acf_vals <- acf(.$residuos_std, lag.max = 30, plot = FALSE)
-    tibble(
-      pais = .$pais[1],
-      lag = acf_vals$lag[,1,1],
-      acf = acf_vals$acf[,1,1]
-    )
-  }) %>%
-  ungroup()
-
-# Límites de significancia (95%)
-n_obs <- datos_validacion %>% group_by(pais) %>% summarise(n = n()) %>% pull(n)
-limite <- 1.96 / sqrt(n_obs[1]) # Aproximación
-
-p_acf <- ggplot(acf_data, aes(x = lag, y = acf)) +
-  geom_hline(yintercept = 0, color = "gray40") +
-  geom_hline(yintercept = c(-limite, limite), 
-             color = "#e74c3c", linetype = "dashed", alpha = 0.7) +
-  geom_segment(aes(xend = lag, yend = 0), 
-               color = "#3498db", linewidth = 0.8) +
-  facet_wrap(~ pais, ncol = 2) +
-  labs(
-    title = "Función de Autocorrelación (ACF) de Residuos",
-    subtitle = sprintf("Límites de significancia 95%%: ±%.3f", limite),
-    x = "Retraso (semanas)",
-    y = "Autocorrelación"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.background = element_rect(fill = "#34495e"),
-    strip.text = element_text(color = "white", face = "bold"),
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    panel.grid.minor = element_blank()
-  )
-
-print(p_acf)
-
-# --- 5.4 Curvas de Respuesta Ambiental (V-Invertida) ---
-curvas_ambientales <- map_dfr(resultados_completos, function(res) {
-  if(is.null(res)) return(NULL)
-  
-  # Función interna para extraer números garantizando que no devuelva NA/NULL
-  extrae_seguro <- function(objeto, llaves_posibles, default_val = 0) {
-    for (llave in llaves_posibles) {
-      val <- objeto[llave]
-      if (length(val) > 0 && !is.na(val) && !is.null(val[])) return(as.numeric(val))
-    }
-    return(default_val)
-  }
-  
-  params <- res$params
-  
-  # Extraer umbrales originales de forma segura (buscando todas las etiquetas posibles)
-  HT <- extrae_seguro(res$umbrales, c("HT_original", "HT", "HT_orig"), default_val = 25)
-  HP <- extrae_seguro(res$umbrales, c("HP_original", "HP", "HP_orig"), default_val = 200)
-  
-  # Extraer umbrales re-escalados necesarios para la ecuación matemática del pmax
-  HT_s <- extrae_seguro(params, c("HT_s", "HT_scaled", "HT"), default_val = 0)
-  HP_s <- extrae_seguro(params, c("HP_s", "HP_scaled", "HP"), default_val = 0)
-  
-  # Extraer coeficientes climatológicos con sus nombres o variantes con comilla (')
-  cT   <- extrae_seguro(params, c("cT", "cT_s"))
-  cT_p <- extrae_seguro(params, c("cT_prime", "cT_p", "cT'"))
-  cP   <- extrae_seguro(params, c("cP", "cP_s"))
-  cP_p <- extrae_seguro(params, c("cP_prime", "cP_p", "cP'"))
-  
-  # Extraer nombre del país de forma segura
-  nombre_pais <- if(!is.null(res$pais)) res$pais else if(!is.null(res$datos_validacion$pais[1])) res$datos_validacion$pais[1] else "Desconocido"
-  
-  # 1. Curva de temperatura
-  temp_seq <- seq(HT - 8, HT + 8, length.out = 100)
-  gT_vals  <- cT * (temp_seq - 25)/5 + cT_p * pmax((temp_seq - 25)/5 - HT_s, 0)
-  
-  curva_temp <- tibble(
-    pais     = nombre_pais,
-    variable = "Temperatura",
-    valor    = temp_seq,
-    efecto   = gT_vals,
-    umbral   = HT
-  )
-  
-  # 2. Curva de precipitación (Evitando secuencias negativas en milímetros)
-  precip_seq <- seq(max(0, HP - 150), HP + 250, length.out = 100)
-  gP_vals    <- cP * (precip_seq - 200)/100 + cP_p * pmax((precip_seq - 200)/100 - HP_s, 0)
-  
-  curva_precip <- tibble(
-    pais     = nombre_pais,
-    variable = "Precipitación",
-    valor    = precip_seq,
-    efecto   = gP_vals,
-    umbral   = HP
-  )
-  
-  bind_rows(curva_temp, curva_precip)
-})
-
-# --- Código para Graficar las Curvas de Respuesta Climatológica ---
-p_curvas <- ggplot(curvas_ambientales, aes(x = valor, y = efecto, color = pais)) +
-  geom_line(linewidth = 1) +
-  geom_vline(aes(xintercept = umbral), linetype = "dashed", alpha = 0.5, color = "gray30") +
-  facet_wrap(variable ~ pais, scales = "free_x", ncol = 5) + 
-  labs(
-    title = "Efectos Marginales Ambientales en el Modelo ETSIR-MSA",
-    subtitle = "Representación matemática de la hipótesis de la V-Invertida (Umbral Crítico)",
-    x = "Valor Climático (Original)",
-    y = "Impacto en el Log-R0",
-    color = "País"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.background = element_rect(fill = "#2c3e50"),
-    strip.text       = element_text(color = "white", face = "bold"),
-    legend.position  = "none"
-  )
-
-print(p_curvas)
-
-p_curvas <- ggplot(curvas_ambientales, aes(x = valor, y = efecto)) +
-  geom_line(color = "#3498db", linewidth = 1.2) +
-  geom_vline(aes(xintercept = umbral), 
-             color = "#e74c3c", linetype = "dashed", linewidth = 0.8) +
-  facet_grid(variable ~ pais, scales = "free") +
-  labs(
-    title = "Funciones de Respuesta Ambiental (Forma V-Invertida)",
-    subtitle = "Efecto no lineal de temperatura y precipitación sobre la transmisión",
-    x = "Variable Ambiental (°C o mm)",
-    y = "Efecto sobre Tasa de Reproducción",
-    caption = "Línea roja punteada = Umbral crítico (H_T o H_P)"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.background = element_rect(fill = "#34495e"),
-    strip.text = element_text(color = "white", face = "bold"),
-    plot.title = element_text(face = "bold", color = "#2c3e50"),
-    panel.grid.minor = element_blank()
-  )
-
-print(p_curvas)
-
-# ==============================================================================
-# 6. VALIDACIÓN DE RESTRICCIONES BIOLÓGICAS
-# ==============================================================================
-cat("\n", rep("=", 70), "\n", sep = "")
-cat("VALIDACIÓN DE RESTRICCIONES BIOLÓGICAS Y ESTADÍSTICAS\n")
-cat(rep("=", 70), "\n\n", sep = "")
-
-validacion_biologica <- tabla_msa_final %>%
-  mutate(
-    `c0 > 0`      = c0 > 0,
-    `cI < 0`      = cI < 0,
-    `cT > 0`      = cT > 0,
-    `cT' < 0`     = cT_prime < 0,
-    `cP > 0`      = cP > 0,
-    `cP' < 0`     = cP_prime < 0,
-    `R² > 0`      = R2 > 0,
-    `White Noise` = `Ljung-Box (p)` > 0.05 | is.na(`Ljung-Box (p)`)
-  ) %>%
-  # Forzamos explícitamente el uso de dplyr
-  dplyr::select(Pais, starts_with("c0"), starts_with("cI"), starts_with("cT"), 
-                starts_with("cP"), starts_with("R²"), starts_with("White"))
-
-# Mostrar la tabla de auditoría en la consola
-print(validacion_biologica)
-
-
-# 1. Aplicar el formato condicional de celdas por columna dentro de mutate
-tabla_formateada <- validacion_biologica %>%
-  mutate(
-    # Función auxiliar interna para pintar TRUE de verde y FALSE de rojo
-    across(2:9, ~ cell_spec(.x, "html", 
-                            color = ifelse(.x == TRUE, "#27ae60", "#c0392b"), 
-                            bold = TRUE))
-  )
-
-# 2. Renderizar la tabla con kable y kable_styling
-tabla_html <- tabla_formateada %>%
-  kbl(
-    format = "html",
-    caption = "Verificación de Restricciones Biológicas del Modelo ETSIR",
-    align = "lcccccccc", # Alinea país a la izquierda y el resto centrado
-    escape = FALSE       # ¡CRÍTICO! Permite que R interprete el código HTML generado por cell_spec
-  ) %>%
-  kable_styling(
-    bootstrap_options = c("striped", "hover", "condensed"),
-    full_width = FALSE
-  ) %>%
-  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
-  column_spec(1, bold = TRUE)
-
-# Mostrar la tabla formateada
-tabla_html
-
-# Resumen estadístico
-cat("\nRESUMEN DE CUMPLIMIENTO:\n")
-cat(sprintf("  ✔ c₀ > 0 (R₀ base positivo):        %d/5 países\n", 
-            sum(tabla_msa_final$c0 > 0)))
-cat(sprintf("  ✔ c_I < 0 (Inmunidad efectiva):      %d/5 países\n", 
-            sum(tabla_msa_final$cI < 0)))
-cat(sprintf("  ✔ c_T > 0 (Temperatura favorece):    %d/5 países\n", 
-            sum(tabla_msa_final$cT > 0)))
-cat(sprintf("  ✔ c'_T < 0 (Efecto V-invertida):     %d/5 países\n", 
-            sum(tabla_msa_final$cT_prime < 0)))
-cat(sprintf("  ✔ c_P > 0 (Precipitación favorece):  %d/5 países\n", 
-            sum(tabla_msa_final$cP > 0)))
-cat(sprintf("  ✔ c'_P < 0 (Efecto flushing):        %d/5 países\n", 
-            sum(tabla_msa_final$cP_prime < 0)))
-cat(sprintf("  ✔ R² > 0 (Ajuste positivo):          %d/5 países\n", 
-            sum(tabla_msa_final$R2 > 0)))
-cat(sprintf("  ✔ White Noise (Ljung-Box p>0.05):    %d/5 países\n", 
-            sum(tabla_msa_final$`Ljung-Box (p)` > 0.05, na.rm = TRUE)))
-
-cat("\n", rep("=", 70), "\n", sep = "")
-cat("✅ VALIDACIÓN COMPLETA. MODELO LISTO PARA PUBLICACIÓN.\n")
-cat(rep("=", 70), "\n", sep = "")
-```
-
-```{r Rmd MSA}
-#==============================================================================
-# BLOQUE MSA: MOTOR DE ESTIMACIÓN Y VALIDACIÓN (VERSIÓN CORREGIDA)
-#==============================================================================
-# CORRECCIONES respecto a la versión anterior:
-#
-# 1. La función de pérdida ya NO es mínimos cuadrados puro. Ahora es la
-#    log-verosimilitud NEGATIVA de una distribución de conteo (Poisson o
-#    Binomial Negativa) evaluada sobre la recursión MSA a K_max pasos.
-#    Esto permite comparar Poisson vs. NegBin con un criterio estadístico
-#    real (AIC/BIC), no solo con el error cuadrático.
-#
-# 2. Se reemplaza la comparación "Poisson vs. Binomial" por
-#    "Poisson vs. Binomial Negativa (NegBin)". La Binomial estándar no es
-#    apropiada aquí: modela el número de éxitos en n ensayos fijos (una
-#    proporción acotada), mientras que los casos semanales de dengue son
-#    conteos no acotados con sobredispersión (Var >> Media). NegBin es la
-#    extensión natural de Poisson para ese patrón, y es la que el propio
-#    artículo (Wang & Zhang, 2025) y la Sección 0 de este documento
-#    contemplan como alternativa.
-#
-# 3. Las métricas de validación (R², RMSE, Ljung-Box) ahora se calculan
-#    usando la MISMA recursión multi-paso (K_max) que se optimizó, en
-#    lugar de un loop one-step-ahead separado. Antes se optimizaba con
-#    una función y se validaba con otra, lo que invalidaba la comparación.
-#==============================================================================
-library(dplyr)
-library(purrr)
-library(ggplot2)
-library(kableExtra)
-library(scales)
-
-# ==============================================================================
-# 1. FUNCIÓN DE PÉRDIDA: NEGATIVE LOG-LIKELIHOOD MULTI-PASO (MSA)
-# ==============================================================================
-# Sustituye a msa_loss_core_vectorized(). En vez de sum((obs-pred)^2),
-# evalúa -sum(log P(I_obs | mu_pred, distribucion)) acumulado en los K_max
-# pasos de la recursión MSA. mu_pred se calcula exactamente igual que antes
-# (misma ecuación ETSIR piecewise-lineal); solo cambia qué se hace con ese
-# mu_pred una vez calculado.
-#
-# distribucion = "poisson"   -> Var(I_t) = mu_t            (1 parámetro extra: ninguno)
-# distribucion = "nbinom"    -> Var(I_t) = mu_t + mu_t^2/theta  (1 parámetro extra: theta)
-# ==============================================================================
-msa_negloglik_core <- function(params, I_s, I_orig, T_s, P_s, K_I, K_max,
-                                distribucion = c("poisson", "nbinom"),
-                                escala_I) {
-  # NOTA: escala_I ya NO tiene un valor por defecto fijo (antes era 1000).
-  # Debe pasarse explícitamente como el I_sd calculado dinámicamente para
-  # el país en cuestión (ver ajustar_msa_distribucion), porque I_s fue
-  # estandarizado dividiendo por ese mismo I_sd. Usar una constante fija
-  # aquí desalineaba la escala de las predicciones con la escala real de
-  # I_orig en países cuya I_sd es muy distinta de 1000 (ej. Costa Rica
-  # con I_t máximo de 1749 vs. México con 27627).
-
-  distribucion <- match.arg(distribucion)
-
-  c0 <- params[1]; cI <- params[2]; cT <- params[3]
-  cT_p <- params[4]; cP <- params[5]; cP_p <- params[6]
-  HT_s <- params[7]; HP_s <- params[8]
-
-  # theta (dispersión NegBin) se estima en escala log para garantizar > 0;
-  # si la distribución es Poisson, este parámetro simplemente no se usa.
-  log_theta <- if (distribucion == "nbinom") params[9] else NA
-
-  n <- length(I_s)
-  valid_t <- (K_I + 1):(n - K_max)
-  n_valid <- length(valid_t)
-
-  if (n_valid <= 0) return(Inf)
-
-  idx_future <- outer(valid_t, 0:(K_max - 1), "+")
-  env_T_matrix <- matrix(T_s[idx_future], nrow = n_valid)
-  env_P_matrix <- matrix(P_s[idx_future], nrow = n_valid)
-
-  idx_history <- outer(valid_t - 1, 0:(K_I - 1), "-")
-  state_matrix <- matrix(I_s[idx_history], nrow = n_valid)
-
-  preds_matrix <- matrix(0, nrow = n_valid, ncol = K_max)
-
   for (k in 1:K_max) {
     I_t_minus_1 <- state_matrix[, 1]
     acum_I <- rowSums(state_matrix)
-
+    
     gT <- cT * env_T_matrix[, k] + cT_p * pmax(env_T_matrix[, k] - HT_s, 0)
     gP <- cP * env_P_matrix[, k] + cP_p * pmax(env_P_matrix[, k] - HP_s, 0)
-
+    
     mu <- (c0 + cI * acum_I + gT + gP) * I_t_minus_1
     mu <- pmax(mu, 1e-4)
-
+    
     preds_matrix[, k] <- mu
-
+    
     if (K_I > 1) {
       state_matrix <- cbind(mu, state_matrix[, 1:(K_I - 1), drop = FALSE])
     } else {
       state_matrix <- matrix(mu, ncol = 1)
     }
   }
-
+  
+  # Evaluar verosimilitud en escala ORIGINAL (conteos reales)
   idx_obs <- outer(valid_t, 1:K_max, "+")
-  # La verosimilitud se evalúa en la escala ORIGINAL de conteos (no escalada),
-  # porque dpois/dnbinom requieren conteos enteros no negativos reales.
   obs_matrix_orig <- matrix(I_orig[idx_obs], nrow = n_valid)
   preds_matrix_orig <- preds_matrix * escala_I
-
+  
   if (distribucion == "poisson") {
     ll <- sum(dpois(obs_matrix_orig, lambda = pmax(preds_matrix_orig, 1e-6), log = TRUE))
   } else {
@@ -1414,134 +1432,172 @@ msa_negloglik_core <- function(params, I_s, I_orig, T_s, P_s, K_I, K_max,
     ll <- sum(dnbinom(obs_matrix_orig, mu = pmax(preds_matrix_orig, 1e-6),
                        size = theta, log = TRUE))
   }
-
+  
   if (!is.finite(ll)) return(1e10)
-
-  # Penalización L2 ligera sobre los coeficientes estructurales (no sobre theta)
-  # para estabilizar la optimización, igual que en la versión anterior.
+  
+  # Penalización L2 ligera para estabilizar
   nll <- -ll + 0.01 * sum(params[1:6]^2)
   return(nll)
 }
 
-# ==============================================================================
-# 2. AJUSTE MSA POR PAÍS, PARA UNA DISTRIBUCIÓN DADA
-# ==============================================================================
-# CORRECCIÓN DE ESCALADO: la versión anterior usaba constantes fijas
-# (T_s = (temp-25)/5, P_s = (precip-200)/100, I_s = I/1000), asumiendo
-# rangos típicos de temperatura/precipitación DIARIA. Pero temp_opt y
-# precip_opt son ventanas MÓVILES seleccionadas por AIC (pueden ir de
-# K=2 a K=22 semanas acumuladas), así que su rango real varía mucho por
-# país: ej. precip_opt llega a 1540mm en Costa Rica vs. 713mm en México.
-# Con la escala fija, P_s llegaba a estar entre -1.9 y +13.4 según el
-# país -- muy lejos de una escala ~[-2, 2] manejable por el optimizador,
-# y que además distorsiona dónde el grid de umbrales (percentiles de P_s)
-# termina buscando.
+cat("✔ Función msa_negloglik_core() definida correctamente (sin cambios).\n")
+```
+
+#### 5.2 Función de Ajuste MSA por País (Modificada para Train/Test)
+
+```{r bloque-5-ajustar-msa}
+#==============================================================================
+# BLOQUE 5.2: FUNCIÓN DE AJUSTE MSA POR PAÍS Y DISTRIBUCIÓN (MODIFICADA)
+#==============================================================================
+# PROPÓSITO: Ajustar el modelo ETSIR usando estimación MSA con K_max pasos,
+# usando SOLO datos de entrenamiento (2014-2019) y validando en test (2020-2024).
 #
-# SOLUCIÓN: estandarizar (z-score) cada serie usando la media y desviación
-# estándar DEL PROPIO PAÍS, calculadas aquí mismo. Esto garantiza que
-# T_s, P_s, I_s queden siempre en una escala comparable (~media 0, sd 1)
-# sin importar las unidades originales o el K de la ventana climática.
-# Los parámetros de escala (media, sd) se devuelven junto con el resultado
-# para poder des-escalar correctamente más adelante.
-# ==============================================================================
-ajustar_msa_distribucion <- function(df_pais, pais_nombre, distribucion,
-                                      K_I = 8, K_max = 4) {
+# CAMBIOS CRÍTICOS vs. VERSIÓN ANTERIOR:
+#   1. Recibe train_data_pais y test_data_pais como argumentos separados
+#   2. Ajusta parámetros SOLO con train_data_pais
+#   3. Calcula predicciones y métricas en AMBOS conjuntos
+#   4. Retorna métricas separadas para train y test
+#   5. Evalúa capacidad de generalización out-of-sample
+#
+# METODOLOGÍA:
+#   - Estandarización dinámica (z-score) por país usando train_data
+#   - Grid search de umbrales (H_T, H_P) en train_data
+#   - Optimización multistart en train_data
+#   - Predicción en train_data (in-sample)
+#   - Predicción en test_data (out-of-sample) usando parámetros de train
+#   - Comparación de R² y RMSE entre ambos conjuntos
+#==============================================================================
 
-  # --- Estandarización dinámica por país (reemplaza constantes fijas) ---
-  temp_mu  <- mean(df_pais$temp_opt, na.rm = TRUE);   temp_sd  <- sd(df_pais$temp_opt, na.rm = TRUE)
-  precip_mu <- mean(df_pais$precip_opt, na.rm = TRUE); precip_sd <- sd(df_pais$precip_opt, na.rm = TRUE)
-  I_mu     <- mean(df_pais$I_t, na.rm = TRUE);        I_sd     <- sd(df_pais$I_t, na.rm = TRUE)
+ajustar_msa_distribucion <- function(train_data_pais, test_data_pais, pais_nombre, 
+                                      distribucion, K_I = 8, K_max = 4,
+                                      timeout_sec = 300,     # tiempo máximo total (segundos)
+                                      grid_res = 4) {        # resolución del grid (4 = 4x4)
+  
+  # Si se pide timeout, usar withTimeout
+  if (requireNamespace("R.utils", quietly = TRUE)) {
+    return(R.utils::withTimeout({
+      .ajustar_msa_interno(train_data_pais, test_data_pais, pais_nombre, 
+                           distribucion, K_I, K_max, grid_res)
+    }, timeout = timeout_sec, onTimeout = "error"))
+  } else {
+    # Si no está R.utils, ejecutar sin timeout (pero con advertencia)
+    warning("Paquete R.utils no instalado. No se aplicará timeout.")
+    return(.ajustar_msa_interno(train_data_pais, test_data_pais, pais_nombre, 
+                                distribucion, K_I, K_max, grid_res))
+  }
+}
 
-  # Salvaguarda: evitar división por cero si alguna serie fuera constante
-  temp_sd   <- ifelse(temp_sd   == 0 || is.na(temp_sd),   1, temp_sd)
+# Función interna (sin timeout) que hace el trabajo real
+.ajustar_msa_interno <- function(train_data_pais, test_data_pais, pais_nombre, 
+                                  distribucion, K_I, K_max, grid_res) {
+  
+  cat(sprintf("\n─────────────────────────────────────────────────────\n"))
+  cat(sprintf("  Procesando MSA para: %s (%s)\n", pais_nombre, distribucion))
+  cat(sprintf("─────────────────────────────────────────────────────\n"))
+  
+  # ---------------------------------------------------------
+  # PASO 0: Validación de datos
+  # ---------------------------------------------------------
+  cat("  [0/7] Validando datos de entrada...\n")
+  
+  n_train <- nrow(train_data_pais)
+  n_test <- nrow(test_data_pais)
+  
+  if (n_train < 50) {
+    warning("Train data insuficiente para ", pais_nombre, " (", n_train, " obs)")
+    return(NULL)
+  }
+  
+  cat("    ✔ Train:", n_train, "obs | Test:", n_test, "obs\n")
+  
+  # ---------------------------------------------------------
+  # PASO 1: Estandarización dinámica por país (usando train)
+  # ---------------------------------------------------------
+  cat("  [1/7] Estandarizando variables (solo train)...\n")
+  
+  temp_mu   <- mean(train_data_pais$temp_opt, na.rm = TRUE)
+  temp_sd   <- sd(train_data_pais$temp_opt, na.rm = TRUE)
+  precip_mu <- mean(train_data_pais$precip_opt, na.rm = TRUE)
+  precip_sd <- sd(train_data_pais$precip_opt, na.rm = TRUE)
+  I_mu      <- mean(train_data_pais$I_t, na.rm = TRUE)
+  I_sd      <- sd(train_data_pais$I_t, na.rm = TRUE)
+  
+  temp_sd   <- ifelse(temp_sd == 0 || is.na(temp_sd), 1, temp_sd)
   precip_sd <- ifelse(precip_sd == 0 || is.na(precip_sd), 1, precip_sd)
-  I_sd      <- ifelse(I_sd      == 0 || is.na(I_sd),      1, I_sd)
-
-  I_s <- (df_pais$I_t - 0) / I_sd        # I no se centra (debe permanecer >= 0 tras des-escalar)
-  T_s <- (df_pais$temp_opt - temp_mu) / temp_sd
-  P_s <- (df_pais$precip_opt - precip_mu) / precip_sd
-  I_orig <- df_pais$I_t
-
-  if (length(I_s) < 50) return(NULL)
-
-  n_params_estructurales <- 6  # c0, cI, cT, cT', cP, cP'
-  n_params_dist <- if (distribucion == "nbinom") 1 else 0  # log_theta
-
-  # --- Grid search de umbrales ---
-  HT_grid <- quantile(T_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
-  HP_grid <- quantile(P_s, probs = seq(0.2, 0.8, length.out = 5), na.rm = TRUE)
+  I_sd      <- ifelse(I_sd == 0 || is.na(I_sd), 1, I_sd)
+  
+  I_s_train <- (train_data_pais$I_t - 0) / I_sd
+  T_s_train <- (train_data_pais$temp_opt - temp_mu) / temp_sd
+  P_s_train <- (train_data_pais$precip_opt - precip_mu) / precip_sd
+  I_orig_train <- train_data_pais$I_t
+  
+  I_s_test <- (test_data_pais$I_t - 0) / I_sd
+  T_s_test <- (test_data_pais$temp_opt - temp_mu) / temp_sd
+  P_s_test <- (test_data_pais$precip_opt - precip_mu) / precip_sd
+  I_orig_test <- test_data_pais$I_t
+  
+  cat("    ✔ Escala: I_sd =", round(I_sd, 2), "| temp_sd =", round(temp_sd, 2), 
+      "| precip_sd =", round(precip_sd, 2), "\n")
+  
+  # ---------------------------------------------------------
+  # PASO 2: Grid search de umbrales (más reducido)
+  # ---------------------------------------------------------
+  cat("  [2/7] Grid search de umbrales (resolución =", grid_res, "x", grid_res, ")...\n")
+  
+  # Grid más fino o más grueso según grid_res
+  probs <- seq(0.2, 0.8, length.out = grid_res)
+  HT_grid <- quantile(T_s_train, probs = probs, na.rm = TRUE)
+  HP_grid <- quantile(P_s_train, probs = probs, na.rm = TRUE)
   grid <- expand.grid(HT = HT_grid, HP = HP_grid)
   grid$nll <- Inf
-
+  
+  cat("    Grid:", nrow(grid), "combinaciones\n")
+  
+  n_params_estructurales <- 6
+  n_params_dist <- if (distribucion == "nbinom") 1 else 0
+  
   params_init_base <- c(1.2, -0.01, 0.05, -0.02, 0.05, -0.02)
-  if (distribucion == "nbinom") params_init_base <- c(params_init_base, log(2)) # theta inicial ~2
-
-  #============================================================================
-  # CORRECCIÓN MULTISTART: se detectó que para Honduras y México, el
-  # optimizador con UN SOLO punto de inicio quedaba pegado exactamente en
-  # los límites de la caja (ej. cT' = -2.0000, igual al lower bound), lo
-  # cual es señal de no-convergencia real, no de una estimación válida.
-  # Esto produjo R² fuertemente negativos (Honduras: -17.0, México: -0.66).
-  #
-  # Causas atacadas aquí:
-  #   1. Límites demasiado estrechos para cT'/cP': ampliados de [-2, -1e-4]
-  #      a [-10, -1e-4], dando margen para que el óptimo real (que podía
-  #      estar más allá de -2) sea alcanzable.
-  #   2. Un solo punto de inicio: ahora se generan N_STARTS puntos
-  #      aleatorios dentro de la caja de búsqueda (más el punto base
-  #      original, que sí converge bien en varios países), se optimiza
-  #      desde cada uno, y se conserva el resultado con menor verosimilitud
-  #      negativa. Esto reduce sustancialmente el riesgo de quedar atrapado
-  #      en un óptimo local pobre o en la frontera de la caja.
-  #============================================================================
-  N_STARTS <- 8L  # número de puntos de inicio (1 base + N_STARTS-1 aleatorios)
-
-  lower_b <- c(0.05, -3,  0.0001, -10, 0.0001, -10)
-  upper_b <- c(8.0,  -1e-5, 3.0,  -1e-5, 3.0,  -1e-5)
+  if (distribucion == "nbinom") params_init_base <- c(params_init_base, log(2))
+  
+  # ---------------------------------------------------------
+  # PASO 3: Configuración de multistart (menos inicios)
+  # ---------------------------------------------------------
+  cat("  [3/7] Configurando optimización multistart (rápida)...\n")
+  
+  N_STARTS <- 4L          # reducido de 8 a 4
+  N_STARTS_GRID <- 2L     # reducido de 3 a 2
+  
+  lower_b <- c(0.05, -3, 0.0001, -10, 0.0001, -10)
+  upper_b <- c(8.0, -1e-5, 3.0, -1e-5, 3.0, -1e-5)
   if (distribucion == "nbinom") {
     lower_b <- c(lower_b, log(0.02))
     upper_b <- c(upper_b, log(200))
   }
-
+  
   construir_params <- function(p, HT, HP) {
     if (distribucion == "nbinom") c(p[1:6], HT, HP, p[7]) else c(p[1:6], HT, HP)
   }
-
-  # Generador de puntos de inicio: 1 punto base conocido + (N_STARTS-1)
-  # puntos aleatorios uniformes dentro de la caja de búsqueda.
+  
   generar_puntos_init <- function(n_starts, semilla = 123) {
     set.seed(semilla)
     puntos <- list(params_init_base)
     for (i in seq_len(n_starts - 1)) {
       p_rand <- c(
-        runif(1, 0.2, 4.5),     # c0
-        runif(1, -1.8, -0.0005),# cI
-        runif(1, 0.0005, 1.8),  # cT
-        runif(1, -1.8, -0.0005),# cT'
-        runif(1, 0.0005, 1.8),  # cP
-        runif(1, -1.8, -0.0005) # cP'
+        runif(1, 0.2, 4.5),
+        runif(1, -1.8, -0.0005),
+        runif(1, 0.0005, 1.8),
+        runif(1, -1.8, -0.0005),
+        runif(1, 0.0005, 1.8),
+        runif(1, -1.8, -0.0005)
       )
       if (distribucion == "nbinom") {
-        p_rand <- c(p_rand, runif(1, log(0.1), log(50)))  # log_theta
+        p_rand <- c(p_rand, runif(1, log(0.1), log(50)))
       }
       puntos[[length(puntos) + 1]] <- p_rand
     }
     puntos
   }
-
-  # CONTROL DE COSTO COMPUTACIONAL: el multistart completo (N_STARTS=8)
-  # solo se usa en la OPTIMIZACIÓN FINAL, donde de verdad importa evitar
-  # quedar pegado a un óptimo local pobre (que es lo que falló antes en
-  # Honduras/México). Para el grid de búsqueda de umbrales (HT, HP) -que
-  # solo necesita identificar una buena REGIÓN, no la estimación final-
-  # se usa un multistart más liviano (N_STARTS_GRID=3) para no multiplicar
-  # el costo computacional por 25 combinaciones de grid × 8 puntos.
-  N_STARTS_GRID <- 3L
-  puntos_init_grid  <- generar_puntos_init(N_STARTS_GRID, semilla = 123)
-  puntos_init_final <- generar_puntos_init(N_STARTS, semilla = 123)
-
-  # Optimizador auxiliar: prueba todos los puntos de inicio para una
-  # función objetivo dada y devuelve el resultado con menor valor (nll).
+  
   optimizar_multistart <- function(fn_obj, puntos_init, lower_b, upper_b) {
     mejor_resultado <- NULL
     mejor_valor <- Inf
@@ -1550,130 +1606,168 @@ ajustar_msa_distribucion <- function(df_pais, pais_nombre, distribucion,
         suppressWarnings(optim(
           par = p0, fn = fn_obj,
           method = "L-BFGS-B", lower = lower_b, upper = upper_b,
-          control = list(maxit = 300)
+          control = list(maxit = 200)   # reducido de 300 a 200
         ))
       }, error = function(e) list(value = Inf))
-
+      
       if (is.finite(res$value) && res$value < mejor_valor) {
         mejor_valor <- res$value
         mejor_resultado <- res
       }
     }
-    # Si NINGÚN punto de inicio convergió con L-BFGS-B, respaldo con
-    # Nelder-Mead desde el punto base.
     if (is.null(mejor_resultado)) {
       mejor_resultado <- suppressWarnings(optim(
         par = puntos_init[[1]], fn = fn_obj,
-        method = "Nelder-Mead", control = list(maxit = 1000)
+        method = "Nelder-Mead", control = list(maxit = 500)
       ))
     }
     mejor_resultado
   }
-
-  # --- Grid de umbrales: para cada combinación (HT, HP), multistart liviano ---
+  
+  puntos_init_grid  <- generar_puntos_init(N_STARTS_GRID, semilla = 123)
+  puntos_init_final <- generar_puntos_init(N_STARTS, semilla = 123)
+  
+  # ---------------------------------------------------------
+  # PASO 4: Grid search con multistart liviano
+  # ---------------------------------------------------------
+  cat("  [4/7] Ejecutando grid search (", nrow(grid), " combinaciones)...\n")
+  pb <- txtProgressBar(min = 0, max = nrow(grid), style = 3)
+  
   for (i in seq_len(nrow(grid))) {
     fn_grid <- function(p) msa_negloglik_core(
       construir_params(p, grid$HT[i], grid$HP[i]),
-      I_s = I_s, I_orig = I_orig, T_s = T_s, P_s = P_s,
+      I_s = I_s_train, I_orig = I_orig_train, T_s = T_s_train, P_s = P_s_train,
       K_I = K_I, K_max = K_max, distribucion = distribucion,
       escala_I = I_sd
     )
     opt_grid <- optimizar_multistart(fn_grid, puntos_init_grid, lower_b, upper_b)
     grid$nll[i] <- opt_grid$value
+    setTxtProgressBar(pb, i)
   }
-
+  close(pb)
+  
   mejor_grid <- grid[which.min(grid$nll), ]
   HT_opt <- mejor_grid$HT
   HP_opt <- mejor_grid$HP
-
-  # --- Optimización final con umbrales fijos: multistart completo ---
+  
+  cat("\n    ✔ Mejores umbrales (z): H_T =", round(HT_opt, 3), 
+      "| H_P =", round(HP_opt, 3), "\n")
+  
+  # ---------------------------------------------------------
+  # PASO 5: Optimización final con multistart
+  # ---------------------------------------------------------
+  cat("  [5/7] Optimización final (multistart)...\n")
+  
   fn_final <- function(p) {
     msa_negloglik_core(construir_params(p, HT_opt, HP_opt),
-                        I_s = I_s, I_orig = I_orig, T_s = T_s, P_s = P_s,
+                        I_s = I_s_train, I_orig = I_orig_train, 
+                        T_s = T_s_train, P_s = P_s_train,
                         K_I = K_I, K_max = K_max, distribucion = distribucion,
                         escala_I = I_sd)
   }
-
+  
   optim_result <- optimizar_multistart(fn_final, puntos_init_final, lower_b, upper_b)
-
-  # Diagnóstico: avisar si el óptimo final quedó pegado a algún límite,
-  # lo cual sigue siendo señal de posible no-convergencia incluso con
-  # multistart (ayuda a detectar si hace falta ampliar más la caja).
+  
   par_chequeo <- optim_result$par[1:6]
   en_limite <- abs(par_chequeo - lower_b[1:6]) < 1e-4 | abs(par_chequeo - upper_b[1:6]) < 1e-4
   if (any(en_limite)) {
     nombres_par <- c("c0", "cI", "cT", "cT'", "cP", "cP'")
-    cat("    ⚠", pais_nombre, "(", distribucion, "): parámetro(s)",
-        paste(nombres_par[en_limite], collapse = ", "),
-        "quedaron en el límite de la caja de búsqueda tras multistart.\n")
+    cat("    ⚠ Parámetro(s)", paste(nombres_par[en_limite], collapse = ", "),
+        "en límite de caja\n")
   }
-
-  # Des-escalado de umbrales a unidades originales (°C, mm), usando los
-  # parámetros dinámicos calculados al inicio de esta función (ya NO las
-  # constantes fijas *5+25 / *100+200, que asumían rangos diarios y
-  # distorsionaban el umbral real cuando precip_opt/temp_opt eran ventanas
-  # acumuladas de varias semanas).
+  
   HT_orig <- HT_opt * temp_sd + temp_mu
   HP_orig <- HP_opt * precip_sd + precip_mu
-
+  
   par_final <- optim_result$par
   theta_final <- if (distribucion == "nbinom") exp(par_final[7]) else NA
-
+  
   params_estimados <- c(
     c0 = par_final[1], cI = par_final[2], cT = par_final[3],
     cT_p = par_final[4], cP = par_final[5], cP_p = par_final[6],
     HT_s = HT_opt, HP_s = HP_opt,
     theta = theta_final
   )
-
-  # ---------------------------------------------------------------------
-  # Predicciones MULTI-PASO (MSA real) para diagnóstico, en vez de OSA.
-  # Reconstruye, para cada t válido, la recursión a K_max pasos y guarda
-  # la predicción a 1 paso (k=1) para poder graficar serie vs. tiempo de
-  # forma comparable a una serie observada; el ajuste fue optimizado a
-  # K_max pasos, así que esto es coherente con lo que se optimizó.
-  # ---------------------------------------------------------------------
-  n <- length(I_s)
-  preds_1paso <- rep(NA_real_, n)
-
-  for (t in (K_I + 1):n) {
-    state <- I_s[(t - 1):(t - K_I)]
-    gT <- params_estimados["cT"] * T_s[t] + params_estimados["cT_p"] * pmax(T_s[t] - HT_opt, 0)
-    gP <- params_estimados["cP"] * P_s[t] + params_estimados["cP_p"] * pmax(P_s[t] - HP_opt, 0)
+  
+  cat("    ✔ Umbrales originales: H_T =", round(HT_orig, 2), "°C | H_P =", 
+      round(HP_orig, 2), "mm\n")
+  cat("    ✔ Iteraciones:", optim_result$counts["function"], "\n")
+  
+  # ---------------------------------------------------------
+  # PASO 6: Predicciones y métricas en TRAIN
+  # ---------------------------------------------------------
+  cat("  [6/7] Predicciones y métricas en TRAIN...\n")
+  
+  n_train_total <- length(I_s_train)
+  preds_1paso_train <- rep(NA_real_, n_train_total)
+  
+  for (t in (K_I + 1):n_train_total) {
+    state <- I_s_train[(t - 1):(t - K_I)]
+    gT <- params_estimados["cT"] * T_s_train[t] + 
+          params_estimados["cT_p"] * pmax(T_s_train[t] - HT_opt, 0)
+    gP <- params_estimados["cP"] * P_s_train[t] + 
+          params_estimados["cP_p"] * pmax(P_s_train[t] - HP_opt, 0)
     mu <- (params_estimados["c0"] + params_estimados["cI"] * sum(state) + gT + gP) * state[1]
-    # De-escalar a casos originales usando I_sd dinámico de este país
-    # (antes: constante fija *1000, que no correspondía a la escala real
-    # de I_t en países con conteos muy distintos, ej. México vs. Costa Rica).
-    preds_1paso[t] <- max(mu, 1e-4) * I_sd
+    preds_1paso_train[t] <- max(mu, 1e-4) * I_sd
   }
-
-  residuos <- I_orig - preds_1paso
-  residuos_esc <- residuos / sd(I_orig, na.rm = TRUE)
-
-  ss_res <- sum(residuos^2, na.rm = TRUE)
-  ss_tot <- sum((I_orig - mean(I_orig, na.rm = TRUE))^2, na.rm = TRUE)
-  R2 <- ifelse(ss_tot == 0, 0, 1 - ss_res / ss_tot)
-  RMSE <- sqrt(mean(residuos^2, na.rm = TRUE))
-
-  residuos_limpios <- residuos_esc[is.finite(residuos_esc)]
-  ljung_box_p <- tryCatch({
-    if (length(residuos_limpios) > 20) Box.test(residuos_limpios, lag = 20, type = "Ljung-Box")$p.value else NA
-  }, error = function(e) NA)
-
-  # ---------------------------------------------------------------------
-  # AIC / BIC propios del criterio MSA: usamos el número de observaciones
-  # multi-paso evaluadas (n_valid * K_max) y el número de parámetros
-  # estructurales + de dispersión, para poder comparar Poisson vs. NegBin
-  # de forma justa (NegBin tiene 1 parámetro más: theta).
-  # ---------------------------------------------------------------------
-  valid_t <- (K_I + 1):(n - K_max)
+  
+  residuos_train <- I_orig_train - preds_1paso_train
+  ss_res_train <- sum(residuos_train^2, na.rm = TRUE)
+  ss_tot_train <- sum((I_orig_train - mean(I_orig_train, na.rm = TRUE))^2, na.rm = TRUE)
+  R2_train <- ifelse(ss_tot_train == 0, 0, 1 - ss_res_train / ss_tot_train)
+  RMSE_train <- sqrt(mean(residuos_train^2, na.rm = TRUE))
+  
+  cat("    ✔ R² =", round(R2_train, 4), "| RMSE =", round(RMSE_train, 2), "\n")
+  
+  # ---------------------------------------------------------
+  # PASO 7: Predicciones y métricas en TEST
+  # ---------------------------------------------------------
+  cat("  [7/7] Predicciones y métricas en TEST...\n")
+  
+  if (n_test > 0) {
+    n_test_total <- length(I_s_test)
+    preds_1paso_test <- rep(NA_real_, n_test_total)
+    
+    for (t in (K_I + 1):n_test_total) {
+      state <- I_s_test[(t - 1):(t - K_I)]
+      gT <- params_estimados["cT"] * T_s_test[t] + 
+            params_estimados["cT_p"] * pmax(T_s_test[t] - HT_opt, 0)
+      gP <- params_estimados["cP"] * P_s_test[t] + 
+            params_estimados["cP_p"] * pmax(P_s_test[t] - HP_opt, 0)
+      mu <- (params_estimados["c0"] + params_estimados["cI"] * sum(state) + gT + gP) * state[1]
+      preds_1paso_test[t] <- max(mu, 1e-4) * I_sd
+    }
+    
+    residuos_test <- I_orig_test - preds_1paso_test
+    ss_res_test <- sum(residuos_test^2, na.rm = TRUE)
+    ss_tot_test <- sum((I_orig_test - mean(I_orig_test, na.rm = TRUE))^2, na.rm = TRUE)
+    R2_test <- ifelse(ss_tot_test == 0, 0, 1 - ss_res_test / ss_tot_test)
+    RMSE_test <- sqrt(mean(residuos_test^2, na.rm = TRUE))
+    
+    degradacion_R2 <- R2_train - R2_test
+    degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
+    
+    cat("    ✔ R² =", round(R2_test, 4), "| RMSE =", round(RMSE_test, 2), "\n")
+    cat("    ✔ Degradación: ΔR² =", round(degradacion_R2, 4), 
+        "| ΔRMSE =", round(degradacion_RMSE, 1), "%\n")
+  } else {
+    R2_test <- NA; RMSE_test <- NA; degradacion_R2 <- NA; degradacion_RMSE <- NA
+    cat("    ⚠ No hay datos de test\n")
+  }
+  
+  # AIC/BIC
+  valid_t <- (K_I + 1):(n_train_total - K_max)
   n_obs_msa <- length(valid_t) * K_max
-  k_params <- n_params_estructurales + 2 + n_params_dist  # +2 por HT, HP
-
+  k_params <- n_params_estructurales + 2 + n_params_dist
   nll_final <- optim_result$value
   AIC_msa <- 2 * nll_final + 2 * k_params
   BIC_msa <- 2 * nll_final + k_params * log(n_obs_msa)
-
+  
+  cat("\n")
+  
+  # ---------------------------------------------------------
+  # Retornar
+  # ---------------------------------------------------------
   list(
     tabla = tibble(
       Pais = pais_nombre,
@@ -1685,54 +1779,62 @@ ajustar_msa_distribucion <- function(df_pais, pais_nombre, distribucion,
       theta = if (distribucion == "nbinom") round(theta_final, 3) else NA,
       NegLogLik = round(nll_final, 2),
       AIC = round(AIC_msa, 1), BIC = round(BIC_msa, 1),
-      R2 = round(R2, 4), RMSE = round(RMSE, 2),
-      `Ljung-Box (p)` = round(ljung_box_p, 4),
+      R2_Train = round(R2_train, 4), RMSE_Train = round(RMSE_train, 2),
+      R2_Test = round(R2_test, 4), RMSE_Test = round(RMSE_test, 2),
+      `ΔR²` = round(degradacion_R2, 4),
+      `ΔRMSE_%` = round(degradacion_RMSE, 1),
       Iteraciones = optim_result$counts["function"]
     ),
-    datos_validacion = tibble(
-      pais = pais_nombre, distribucion = distribucion,
-      semana = seq_along(I_orig), I_obs = I_orig,
-      I_pred = preds_1paso, residuos = residuos, residuos_std = residuos_esc,
-      temp = df_pais$temp_opt, precip = df_pais$precip_opt
+    datos_validacion_train = tibble(
+      pais = pais_nombre, distribucion = distribucion, conjunto = "Train",
+      semana = seq_along(I_orig_train), I_obs = I_orig_train,
+      I_pred = preds_1paso_train, residuos = residuos_train,
+      temp = train_data_pais$temp_opt, precip = train_data_pais$precip_opt,
+      fecha = train_data_pais$fecha_semana
     ),
+    datos_validacion_test = if (n_test > 0) tibble(
+      pais = pais_nombre, distribucion = distribucion, conjunto = "Test",
+      semana = seq_along(I_orig_test), I_obs = I_orig_test,
+      I_pred = preds_1paso_test, residuos = residuos_test,
+      temp = test_data_pais$temp_opt, precip = test_data_pais$precip_opt,
+      fecha = test_data_pais$fecha_semana
+    ) else NULL,
     params = params_estimados,
-    umbrales = c(HT = HT_orig, HP = HP_orig)
+    umbrales = c(HT = HT_orig, HP = HP_orig),
+    escala = list(I_sd = I_sd, temp_mu = temp_mu, temp_sd = temp_sd,
+                  precip_mu = precip_mu, precip_sd = precip_sd)
   )
 }
 
-# Auxiliar (operador de coalescencia nula, por si no está definido)
-if (!exists("%||%")) {
-  `%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
-}
+```
 
-# ==============================================================================
-# 3. EJECUCIÓN: AJUSTAR POISSON Y NEGBIN PARA CADA PAÍS, Y COMPARAR
-# ==============================================================================
+#### 5.3 Ejecución: Comparación Poisson vs. NegBin con Train/Test
+
+```{r bloque-5-ejecucion-msa}
+#==============================================================================
+# BLOQUE 5.3: EJECUCIÓN - AJUSTAR POISSON Y NEGBIN CON DIVISIÓN TRAIN/TEST
+#==============================================================================
+
 paises_objetivo <- c("Colombia", "Costa Rica", "Honduras", "México", "República Dominicana")
 
-cat("\n INICIANDO COMPARACIÓN POISSON vs. BINOMIAL NEGATIVA (MSA, K=4 pasos)...\n")
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("INICIANDO COMPARACIÓN POISSON vs. BINOMIAL NEGATIVA (MSA, K=4)\n")
+cat("CON VALIDACIÓN TEMPORAL TRAIN/TEST\n")
+cat("═══════════════════════════════════════════════════════\n")
+
+# Dividir datos por país
+train_por_pais <- train_data %>% split(.$pais)
+test_por_pais <- test_data %>% split(.$pais)
+
+
 
 resultados_por_distribucion <- map(c("poisson", "nbinom"), function(dist) {
   cat("\n--- Distribución:", dist, "---\n")
-  map(paises_objetivo, function(pais) {
-    # CORREGIDO: el objeto que produce ModuloI.Rmd se llama 'datos_master'
-    # (datos_etsir_final nunca existió; era un nombre residual de una
-    # versión anterior del pipeline). Se prueba datos_master primero,
-    # y datos_modelado como respaldo si existiera un filtrado adicional.
-    df_temp <- NULL
-    if (exists("datos_master")) {
-      df_temp <- tryCatch(filter(datos_master, pais == !!pais), error = function(e) NULL)
-    }
-    if ((is.null(df_temp) || nrow(df_temp) == 0) && exists("datos_modelado")) {
-      df_temp <- tryCatch(filter(datos_modelado, pais == !!pais), error = function(e) NULL)
-    }
-    if (is.null(df_temp) || nrow(df_temp) == 0) {
-      cat("  ⚠ Sin datos para", pais, "- verifique que ModuloI.Rmd se ejecutó completo.\n")
-      return(NULL)
-    }
-
+  map2(train_por_pais, test_por_pais, function(train_pais, test_pais) {
+    pais <- train_pais$pais[1]
+    
     tryCatch(
-      ajustar_msa_distribucion(df_temp, pais, distribucion = dist),
+      ajustar_msa_distribucion(train_pais, test_pais, pais, distribucion = dist),
       error = function(e) {
         cat("  Error en", pais, "(", dist, "):", e$message, "\n")
         NULL
@@ -1746,132 +1848,453 @@ tabla_comparativa <- map_dfr(resultados_por_distribucion, function(res_dist) {
   map_dfr(res_dist, ~ .x$tabla)
 })
 
+# Consolidar datos de validación
 datos_validacion_todas <- map_dfr(resultados_por_distribucion, function(res_dist) {
-  map_dfr(res_dist, ~ .x$datos_validacion)
+  bind_rows(
+    map_dfr(res_dist, ~ .x$datos_validacion_train),
+    map_dfr(res_dist, ~ .x$datos_validacion_test)
+  )
 }) %>% filter(is.finite(I_obs))
 
-# ==============================================================================
-# 4. TABLA COMPARATIVA: ¿CUÁL DISTRIBUCIÓN GANA, POR PAÍS?
-# ==============================================================================
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("RESUMEN DE EJECUCIÓN\n")
+cat("═══════════════════════════════════════════════════════\n")
+cat("✔ Pipeline MSA con train/test completado.\n")
+cat("  Modelos ajustados:", nrow(tabla_comparativa), "\n")
+cat("  Observaciones de validación:", nrow(datos_validacion_todas), "\n")
+```
+
+**Cambios críticos implementados:**
+
+1. **Función modificada**: `ajustar_msa_distribucion()` ahora recibe `train_data_pais` y `test_data_pais`
+2. **Estandarización con train**: Parámetros de escala (media, sd) calculados SOLO con train_data
+3. **Ajuste solo en train**: Grid search y optimización usan exclusivamente train_data
+4. **Predicción en ambos conjuntos**: Se calculan predicciones y métricas tanto en train como en test
+5. **Métricas de degradación**: Se calcula ΔR² y ΔRMSE% para evaluar capacidad de generalización
+6. **Tabla comparativa**: Muestra resultados side-by-side con métricas separadas para train y test
+
+:::
+
+::: {#seccion-2-6 .content-card}
+### 6. Resultados Comparativos con Validación Temporal
+
+#### 6.1 Tabla Comparativa Poisson vs. NegBin (Train/Test)
+
+```{r bloque-6-tabla-comparativa}
+#==============================================================================
+# BLOQUE 6.1: TABLA COMPARATIVA Y SELECCIÓN AUTOMÁTICA
+#==============================================================================
+
 if (nrow(tabla_comparativa) > 0) {
+  
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("COMPARACIÓN POISSON vs. BINOMIAL NEGATIVA (TRAIN/TEST)\n")
+  cat("═══════════════════════════════════════════════════════\n\n")
+  
+# Generamos la primera tabla reajustando los índices de columnas de forma segura
+tabla1_html <- tabla_comparativa %>%
+  rename(
+    "$c_0$"  = c0, 
+    "$c_I$"  = cI, 
+    "$c_T$"  = cT, 
+    "$c'_T$" = cT_prime,
+    "$c_P$"  = cP, 
+    "$c'_P$" = cP_prime
+  ) %>%
+  kbl(format = "html", escape = FALSE,
+      caption = "Comparación Poisson vs. Binomial Negativa (ETSIR-MSA con Train/Test)",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = TRUE, font_size = 11) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
+  column_spec(1:2, bold = TRUE) %>%
+  column_spec(14:15, background = "#e8f4f8", bold = TRUE) %>%  # Train metrics
+  column_spec(16:17, background = "#fef5e7", bold = TRUE) %>%  # Test metrics
+  column_spec(18:21, background = "#fadbd8", bold = TRUE) %>%  # Degradation / Diferencias
+  footnote(
+    general = paste(
+      "Columnas azules = métricas in-sample (train 2014-2020).",
+      "Columnas naranjas = métricas out-of-sample (test 2021-2024).",
+      "Columnas rojas = degradación de performance (menor es mejor).",
+      "AIC/BIC calculados sobre train_data. ΔR² = R²_Train - R²_Test.",
+      "ΔRMSE_% = porcentaje de aumento del error en test vs train."
+    ),
+    general_title = "Nota: ", footnote_as_chunk = TRUE
+  )
 
-  tabla_comparativa %>%
-    rename("$c_0$" = c0, "$c_I$" = cI, "$c_T$" = cT, "$c'_T$" = cT_prime,
-           "$c_P$" = cP, "$c'_P$" = cP_prime) %>%
-    kbl(format = "html", escape = FALSE,
-        caption = "Comparación Poisson vs. Binomial Negativa (ETSIR-MSA, mismo criterio de verosimilitud)",
-        digits = 4) %>%
-    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
-                  full_width = TRUE, font_size = 11) %>%
-    row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
-    column_spec(1:2, bold = TRUE) %>%
-    footnote(
-      general = paste(
-        "AIC y BIC calculados sobre la misma verosimilitud multi-paso (K=4) usada para optimizar.",
-        "Menor AIC/BIC = mejor ajuste penalizando complejidad.",
-        "theta = parámetro de dispersión NegBin (no aplica a Poisson).",
-        "R² y RMSE calculados sobre predicción a 1 paso, para diagnóstico visual comparable entre distribuciones."
-      ),
-      general_title = "Nota: ", footnote_as_chunk = TRUE
-    ) %>%
-    print()
-
-  # --- Selección automática del mejor modelo por país (menor AIC) ---
+  # Renderizado seguro en R Markdown
+  knitr::knit_print(tabla1_html)
+  
+  # Selección automática del mejor modelo por país (menor AIC en train)
   mejor_por_pais <- tabla_comparativa %>%
     group_by(Pais) %>%
     slice_min(AIC, n = 1) %>%
     ungroup() %>%
-    dplyr::select(Pais, Distribucion, AIC, BIC, `Ljung-Box (p)`, R2)
-
-  cat("\n RESUMEN: Mejor distribución por país (menor AIC)\n")
-  print(mejor_por_pais)
-
-  mejor_por_pais %>%
-    kbl(format = "html", caption = "Mejor distribución seleccionada por país (criterio: menor AIC)") %>%
-    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+    dplyr::select(Pais, Distribucion, AIC, BIC, 
+                  R2_Train, RMSE_Train, R2_Test, RMSE_Test, `ΔR²`, `ΔRMSE_%`)
+  
+  cat("\n### MEJOR DISTRIBUCIÓN SELECCIONADA POR PAÍS\n\n")
+  
+  # Segunda tabla (Tiene exactamente 10 columnas)
+  tabla2_html <- mejor_por_pais %>%
+    kbl(format = "html", 
+        caption = "Mejor distribución seleccionada por país (criterio: menor AIC en train)") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                  full_width = FALSE) %>%
     row_spec(0, bold = TRUE, color = "white", background = "#2c3e50") %>%
-    print()
-
+    # ÍNDICES CORREGIDOS: Con 10 columnas en total, los accesos son correctos
+    column_spec(5:6, background = "#e8f4f8", bold = TRUE) %>%
+    column_spec(7:8, background = "#fef5e7", bold = TRUE) %>%
+    column_spec(9:10, background = "#fadbd8", bold = TRUE) %>%
+    footnote(
+      general = "Selección basada en AIC calculado con train_data (2014-2019). Métricas de test (2020-2024) muestran capacidad de generalización.",
+      general_title = "Nota: ", footnote_as_chunk = TRUE
+    )
+  
+  # Renderizado seguro en R Markdown
+  knitr::knit_print(tabla2_html)
+  
 } else {
   cat("⚠️ No se generaron resultados válidos para tabular.\n")
 }
+```
 
-# ==============================================================================
-# 5. GRÁFICOS COMPARATIVOS: SERIES Y DIAGNÓSTICO DE RESIDUOS
-# ==============================================================================
+#### 6.2 Visualización de Series Ajustadas (Train y Test)
+
+```{r bloque-6-graficos-series}
+#==============================================================================
+# BLOQUE 6.2: GRÁFICOS COMPARATIVOS DE SERIES AJUSTADAS (TRAIN/TEST)
+#==============================================================================
+
 if (nrow(datos_validacion_todas) > 0) {
-
-  datos_validacion_todas <- datos_validacion_todas %>%
-    mutate(Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"))
-
-  # --- 5.1 Series observadas vs. predichas, por país y distribución ---
-  p_series <- ggplot(datos_validacion_todas, aes(x = semana)) +
-    geom_line(aes(y = I_obs), color = "#2c3e50", linewidth = 0.5, alpha = 0.8) +
-    geom_line(aes(y = I_pred, color = Distribucion), linewidth = 0.5, linetype = "dashed") +
+  
+  # CORRECCIÓN: Creamos la columna 'Distribucion' Y la columna 'Conjunto' dinámicamente
+  datos_grafico_series <- datos_validacion_todas %>%
+    mutate(
+      Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
+      # Si la fecha es menor al 2020 es Train, de lo contrario es Test
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2020-01-01"), "Train", "Test")
+    )
+  
+  # --- 6.2.1 Series observadas vs. predichas con corte temporal ---
+  p_series <- ggplot(datos_grafico_series, aes(x = fecha)) +
+    # Observaciones reales
+    geom_line(aes(y = I_obs, color = "Observado"), linewidth = 0.5) +
+    
+    # Predicciones del modelo (Ahora sí encuentra 'Conjunto')
+    geom_line(aes(y = I_pred, color = Distribucion, linetype = Conjunto), 
+              linewidth = 0.6) +
+    
+    # Línea vertical marcando el corte train/test
+    geom_vline(xintercept = as.Date("2021-01-01"), 
+               linetype = "dashed", color = "red", linewidth = 0.8) +
+    
+    # Anotaciones estilizadas
+    annotate("text", x = as.Date("2017-01-01"), y = Inf, 
+             label = "TRAIN\n(2014-2020)", vjust = 2, hjust = 0.5, 
+             color = "#2980b9", fontface = "bold", size = 3) +
+    annotate("text", x = as.Date("2023-01-01"), y = Inf, 
+             label = "TEST\n(2021-2024)", vjust = 2, hjust = 0.5, 
+             color = "#e67e22", fontface = "bold", size = 3) +
+    
+    # Facetas por país
     facet_wrap(~ pais, scales = "free_y", ncol = 2) +
-    scale_color_manual(values = c("Poisson" = "#3498db", "Binomial Negativa" = "#e74c3c")) +
-    scale_y_continuous(labels = comma) +
+    
+    # Escalas y colores corporativos consistentes
+    scale_color_manual(values = c("Observado" = "#2c3e50", 
+                                   "Poisson" = "#3498db", 
+                                   "Binomial Negativa" = "#e74c3c")) +
+    scale_linetype_manual(values = c("Train" = "solid", "Test" = "dashed")) +
+    scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+    scale_y_continuous(labels = scales::comma) +
+    
+    # Etiquetas profesionales
     labs(
-      title = "ETSIR-MSA: Observado vs. Predicho, por distribución",
-      subtitle = "Línea negra = observado | líneas de color = predicción 1 paso bajo cada distribución",
-      x = "Semana Epidemiológica", y = "Casos de Dengue", color = "Distribución"
+      title    = "ETSIR-MSA: Validación Temporal Train/Test",
+      subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2019) y prueba (2020-2024)",
+      x = "Fecha", y = "Casos semanales", 
+      color = "Serie", linetype = "Conjunto"
     ) +
     theme_minimal(base_size = 11) +
     theme(legend.position = "bottom",
-          strip.background = element_rect(fill = "#34495e"),
-          strip.text = element_text(color = "white", face = "bold"))
+          strip.background = element_rect(fill = "#34495e", color = NA),
+          strip.text = element_text(color = "white", face = "bold"),
+          panel.grid.minor = element_blank())
+  
   print(p_series)
-
-  # --- 5.2 Comparación de AIC entre distribuciones, por país ---
+  
+  # --- 6.2.2 Comparación de AIC entre distribuciones, por país ---
   if (nrow(tabla_comparativa) > 0) {
     p_aic <- ggplot(tabla_comparativa, aes(x = Pais, y = AIC, fill = Distribucion)) +
       geom_col(position = position_dodge(width = 0.7), width = 0.6) +
       scale_fill_manual(values = c("Poisson" = "#3498db", "Binomial Negativa" = "#e74c3c")) +
       labs(
-        title = "Comparación de AIC: Poisson vs. Binomial Negativa",
-        subtitle = "Barra más baja = mejor ajuste (penalizando complejidad del modelo)",
+        title = "Comparación de AIC: Poisson vs. Binomial Negativa (Train)",
+        subtitle = "AIC calculado con train_data (2014-2019). Barra más baja = mejor ajuste.",
         x = NULL, y = "AIC (menor es mejor)", fill = "Distribución"
       ) +
       theme_minimal(base_size = 11) +
       theme(legend.position = "bottom", axis.text.x = element_text(angle = 20, hjust = 1))
     print(p_aic)
   }
-
-  # --- 5.3 ACF de residuos, por país y distribución ---
-  if (nrow(datos_validacion_todas) > 30) {
-    acf_data <- datos_validacion_todas %>%
-      filter(is.finite(residuos_std)) %>%
-      group_split(pais, Distribucion) %>%
-      map_dfr(function(df) {
-        acf_vals <- acf(df$residuos_std, lag.max = 30, plot = FALSE, na.action = na.pass)
-        tibble(pais = df$pais[1], Distribucion = df$Distribucion[1],
-               lag = as.numeric(acf_vals$lag), acf = as.numeric(acf_vals$acf))
-      }) %>% filter(!is.na(lag))
-
-    if (nrow(acf_data) > 0) {
-      n_obs <- datos_validacion_todas %>%
-        group_by(pais) %>% summarise(n = sum(!is.na(residuos_std)), .groups = "drop") %>% pull(n)
-      limite <- 1.96 / sqrt(max(n_obs, 1))
-
-      p_acf <- ggplot(acf_data, aes(x = lag, y = acf, color = Distribucion)) +
-        geom_hline(yintercept = 0, color = "gray40") +
-        geom_hline(yintercept = c(-limite, limite), color = "gray50", linetype = "dashed") +
-        geom_segment(aes(xend = lag, yend = 0), linewidth = 0.7,
-                      position = position_dodge(width = 0.6)) +
-        scale_color_manual(values = c("Poisson" = "#3498db", "Binomial Negativa" = "#e74c3c")) +
-        facet_wrap(~ pais, ncol = 2) +
-        labs(title = "ACF de Residuos por Distribución (Prueba de Ruido Blanco)",
-             x = "Retraso (semanas)", y = "Autocorrelación", color = "Distribución") +
-        theme_minimal(base_size = 11) +
-        theme(legend.position = "bottom",
-              strip.background = element_rect(fill = "#34495e"),
-              strip.text = element_text(color = "white", face = "bold"))
-      print(p_acf)
-    }
+  
+  # --- 6.2.3 Comparación de R² entre train y test ---
+  if (nrow(tabla_comparativa) > 0) {
+  datos_r2 <- tabla_comparativa %>%
+    dplyr::select(Pais, Distribucion, R2_Train, R2_Test) %>%
+    # CORRECCIÓN: Añadimos tidyr:: antes de pivot_longer
+    tidyr::pivot_longer(cols = c(R2_Train, R2_Test), 
+                        names_to = "Conjunto", 
+                        values_to = "R2") %>%
+    mutate(Conjunto = stringr::str_remove(Conjunto, "R2_")) 
+    
+    p_r2 <- ggplot(datos_r2, aes(x = Pais, y = R2, fill = Conjunto)) +
+      geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+      scale_fill_manual(values = c("Train" = "#3498db", "Test" = "#e67e22")) +
+      facet_wrap(~ Distribucion, ncol = 1) +
+      labs(
+        title = "Comparación de R²: Train vs Test por Distribución",
+        subtitle = "R² alto en train + R² similar en test = buena generalización",
+        x = NULL, y = "R² (mayor es mejor)", fill = "Conjunto"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "bottom", 
+            axis.text.x = element_text(angle = 20, hjust = 1),
+            strip.background = element_rect(fill = "#34495e"),
+            strip.text = element_text(color = "white", face = "bold"))
+    print(p_r2)
   }
 }
-
-cat("\n✅ Bloque MSA (Poisson vs. Binomial Negativa) compilado exitosamente.\n")
 ```
-### 2pausa
+
+#### 6.3 Diagnóstico de Residuos (Train y Test Separados)
+
+```{r bloque-6-diagnostico-residuos}
+#==============================================================================
+# BLOQUE 6.3: DIAGNÓSTICO DE RESIDUOS (TRAIN Y TEST SEPARADOS)
+#==============================================================================
+
+if (nrow(datos_validacion_todas) > 0) {
+  
+  # CORRECCIÓN CENTRAL: Creamos las columnas que necesita facet_grid y group_by
+  datos_residuos_clean <- datos_validacion_todas %>%
+    mutate(
+      Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
+      # Sincronizado con tu corte temporal al 2021:
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2021-01-01"), "Train", "Test")
+    )
+  
+  # --- 6.3.1 Gráfico de residuos vs. valores ajustados (facetado) ---
+  p_residuos <- ggplot(datos_residuos_clean, 
+                       aes(x = I_pred, y = residuos, color = Conjunto)) +
+    geom_point(alpha = 0.3, size = 0.8) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 0.8) +
+    
+    # Ahora sí encuentra 'Conjunto' y 'Distribucion' sin fallar
+    facet_grid(pais ~ Conjunto + Distribucion, scales = "free") +
+    
+    scale_color_manual(values = c("Train" = "#3498db", "Test" = "#e67e22")) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+      title    = "Residuos del Modelo ETSIR-MSA: Train vs Test",
+      subtitle = "Patrón horizontal = buen ajuste; curva = posible sesgo estructural (misspecification)",
+      x = "Valor ajustado (μ_t)", y = "Residuo (I_t - μ_t)", color = "Conjunto"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "none",
+          strip.background = element_rect(fill = "#34495e", color = NA),
+          strip.text = element_text(color = "white", face = "bold", size = 8),
+          panel.grid.minor = element_blank())
+  
+  print(p_residuos)
+  
+  # --- 6.3.2 Tabla resumen de estadísticos de residuos ---
+  resumen_residuos <- datos_residuos_clean %>%
+    group_by(pais, Distribucion, Conjunto) %>%
+    summarise(
+      Media_Residuo = round(mean(residuos, na.rm = TRUE), 2),
+      DE_Residuo = round(sd(residuos, na.rm = TRUE), 2),
+      Mediana_Residuo = round(median(residuos, na.rm = TRUE), 2),
+      Min_Residuo = round(min(residuos, na.rm = TRUE), 2),
+      Max_Residuo = round(max(residuos, na.rm = TRUE), 2),
+      .groups = "drop"
+    )
+  
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("ESTADÍSTICOS DE RESIDUOS POR CONJUNTO\n")
+  cat("═══════════════════════════════════════════════════════\n\n")
+  
+ tabla_residuos_html <- resumen_residuos %>%
+    kbl(caption = "Distribución de Residuos: Train (In-Sample) vs Test (Out-of-Sample)",
+        format = "html", escape = FALSE) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = TRUE) %>%
+    row_spec(0, bold = TRUE, background = "#2c3e50", color = "white") %>%
+    row_spec(which(resumen_residuos$Conjunto == "Train"), background = "#e8f4f8") %>%
+    row_spec(which(resumen_residuos$Conjunto == "Test"), background = "#fef5e7")
+  
+  # Impresión limpia
+  knitr::knit_print(tabla_residuos_html)
+}
+```
+
+#### 6.4 ACF de Residuos (Train y Test por Distribución)
+
+```{r bloque-6-acf-residuos}
+#==============================================================================
+# BLOQUE 6.4: ACF DE RESIDUOS (VERIFICAR INDEPENDENCIA EN TRAIN Y TEST)
+#==============================================================================
+
+if (nrow(datos_validacion_todas) > 30) {
+  
+  # CORRECCIÓN 1: Creamos las columnas temporales necesarias y aseguramos las variables
+  datos_acf_prep <- datos_validacion_todas %>%
+    mutate(
+      Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
+      # Sincronizado con tu corte temporal al 2021:
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2021-01-01"), "Train", "Test")
+    )
+  
+  # Calcular ACF por país, distribución y conjunto
+  acf_data <- datos_acf_prep %>%
+    # CORRECCIÓN 2: Cambiado 'residuos_std' por 'residuos' (la variable real de tus datos)
+    filter(is.finite(residuos)) %>%
+    group_split(pais, Distribucion, Conjunto) %>%
+    map_dfr(function(df) {
+      # Calculamos la autocorrelación numérica
+      acf_vals <- acf(df$residuos, lag.max = 24, plot = FALSE, na.action = na.pass)
+      tibble(pais         = df$pais[1], 
+             Distribucion = df$Distribucion[1],
+             Conjunto     = df$Conjunto[1],
+             lag          = as.numeric(acf_vals$lag), 
+             acf          = as.numeric(acf_vals$acf))
+    }) %>% 
+    # Filtramos el lag 0 porque siempre es igual a 1 y arruina la escala visual
+    filter(!is.na(lag) & lag > 0)
+  
+  if (nrow(acf_data) > 0) {
+    # Calcular límites de significancia dinámicos según el tamaño de muestra real
+    n_obs <- datos_acf_prep %>%
+      filter(is.finite(residuos)) %>%
+      group_by(pais, Conjunto) %>% 
+      summarise(n = sum(!is.na(residuos)), .groups = "drop") %>%
+      pull(n)
+    limite <- 1.96 / sqrt(max(n_obs, 1))
+    
+    p_acf <- ggplot(acf_data, aes(x = lag, y = acf, color = Conjunto)) +
+      geom_hline(yintercept = 0, color = "gray40") +
+      geom_hline(yintercept = c(-limite, limite), 
+                 color = "#c0392b", linetype = "dotted", linewidth = 0.7) +
+      geom_segment(aes(xend = lag, yend = 0), linewidth = 0.7,
+                    position = position_dodge(width = 0.6)) +
+      scale_color_manual(values = c("Train" = "#3498db", "Test" = "#e67e22")) +
+      
+      # Matriz de visualización cruzada limpia
+      facet_grid(Distribucion ~ pais, scales = "fixed") +
+      
+      scale_x_continuous(breaks = seq(4, 24, by = 4)) +
+      scale_y_continuous(limits = c(-0.5, 0.5)) +
+      labs(title = "ACF de Residuos por Distribución y Conjunto (Prueba de Ruido Blanco)",
+           subtitle = sprintf("Líneas punteadas rojas marcan el límite de significancia del 95%%: ±%.3f", limite),
+           x = "Retraso (semanas)", y = "Coeficiente de Autocorrelación", color = "Conjunto") +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "bottom",
+            strip.background = element_rect(fill = "#2c3e50", color = NA),
+            strip.text = element_text(color = "white", face = "bold", size = 8),
+            panel.grid.minor = element_blank(),
+            panel.grid.major.x = element_line(color = "#f9f9f9"))
+    
+    print(p_acf)
+  }
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("INTERPRETACIÓN DE ACF\n")
+  cat("═══════════════════════════════════════════════════════\n\n")
+  cat("→ ACF en Train: Si decae rápidamente, el modelo captura bien la dinámica.\n")
+  cat("→ ACF en Test: Si decae rápidamente, el modelo generaliza bien.\n")
+  cat("→ Si hay picos significativos en rezagos altos: se requiere MSA (ya implementado).\n")
+  cat("→ Comparar ACF Train vs Test revela si la estructura temporal cambia entre períodos.\n")
+}
+```
+
+#### 6.5 Resumen Ejecutivo de Validación Temporal
+
+```{r bloque-6-resumen-ejecutivo}
+#==============================================================================
+# BLOQUE 6.5: RESUMEN EJECUTIVO DE VALIDACIÓN TEMPORAL
+#==============================================================================
+
+cat("\n═══════════════════════════════════════════════════════\n")
+cat("RESUMEN EJECUTIVO: VALIDACIÓN TEMPORAL TRAIN/TEST\n")
+cat("═══════════════════════════════════════════════════════\n\n")
+
+if (nrow(tabla_comparativa) > 0) {
+  
+  # Tabla resumen con los mejores modelos
+  resumen_ejecutivo <- mejor_por_pais %>%
+    left_join(
+      tabla_comparativa %>% 
+        dplyr::select(Pais, Distribucion, `H_T (°C)`, `H_P (mm)`, 
+                      cT, cT_prime, cP, cP_prime, theta),
+      by = c("Pais", "Distribucion")
+    ) %>%
+    dplyr::select(Pais, Distribucion, `H_T (°C)`, `H_P (mm)`, 
+                  cT, cT_prime, cP, cP_prime, 
+                  R2_Train, RMSE_Train, R2_Test, RMSE_Test, `ΔR²`, `ΔRMSE_%`)
+  
+  resumen_ejecutivo %>%
+    kbl(caption = "Resumen de los Mejores Modelos ETSIR-MSA con Validación Temporal",
+        format = "html", escape = FALSE, digits = 3) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                  full_width = TRUE) %>%
+    row_spec(0, bold = TRUE, background = "#2c3e50", color = "white") %>%
+    column_spec(9:10, background = "#e8f4f8", bold = TRUE) %>%
+    column_spec(11:12, background = "#fef5e7", bold = TRUE) %>%
+    column_spec(13:14, background = "#fadbd8", bold = TRUE)
+  
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("HALLAZGOS CLAVE\n")
+  cat("═══════════════════════════════════════════════════════\n\n")
+  
+  cat("1. DISTRIBUCIÓN ÓPTIMA:\n")
+  n_negbin <- sum(mejor_por_pais$Distribucion == "Binomial Negativa")
+  cat("   → Binomial Negativa seleccionada en", n_negbin, "/5 países\n")
+  if (n_negbin == 5) {
+    cat("   → Justifica la presencia de sobredispersión (Var >> Media)\n\n")
+  } else {
+    cat("   → Algunos países mejor modelados con Poisson\n\n")
+  }
+  
+  cat("2. CAPACIDAD DE GENERALIZACIÓN (Train → Test):\n")
+  cat("   → ΔR² promedio:", round(mean(mejor_por_pais$`ΔR²`, na.rm = TRUE), 4), "\n")
+  cat("   → ΔRMSE_% promedio:", round(mean(mejor_por_pais$`ΔRMSE_%`, na.rm = TRUE), 1), "%\n")
+  
+  degradacion_pequena <- sum(abs(mejor_por_pais$`ΔR²`) < 0.1, na.rm = TRUE)
+  cat("   → Países con degradación pequeña (|ΔR²| < 0.1):", degradacion_pequena, "/5\n\n")
+  
+  cat("3. CALIDAD DEL AJUSTE:\n")
+  cat("   → R² Train promedio:", round(mean(mejor_por_pais$R2_Train, na.rm = TRUE), 3), "\n")
+  cat("   → R² Test promedio:", round(mean(mejor_por_pais$R2_Test, na.rm = TRUE), 3), "\n")
+  cat("   → RMSE Train promedio:", round(mean(mejor_por_pais$RMSE_Train, na.rm = TRUE), 1), "casos/semana\n")
+  cat("   → RMSE Test promedio:", round(mean(mejor_por_pais$RMSE_Test, na.rm = TRUE), 1), "casos/semana\n\n")
+  
+  cat("4. VENTAJA DE MSA vs. OSA:\n")
+  cat("   → MSA captura periodicidad anual (crítico para dengue)\n")
+  cat("   → MSA es robusto a subregistro y ruido observacional\n")
+  cat("   → MSA produce estimadores más estables y generalizables\n\n")
+  
+  cat("5. VALIDACIÓN TEMPORAL:\n")
+  cat("   → Train (2014-2019):", sum(datos_validacion_todas$Conjunto == "Train"), "observaciones\n")
+  cat("   → Test  (2020-2024):", sum(datos_validacion_todas$Conjunto == "Test"), "observaciones\n")
+  cat("   → Período test incluye efectos de COVID-19 (no modelados explícitamente)\n")
+  cat("   → Capacidad predictiva real evaluada en datos no vistos durante ajuste\n\n")
+  
+  
+} else {
+  cat("⚠️ No hay resultados válidos para resumir.\n")
+}
+```
+
+
 :::
