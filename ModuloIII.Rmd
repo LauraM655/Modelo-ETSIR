@@ -9,18 +9,18 @@ knitr::opts_chunk$set(
 ```
 
 ::: index-box
--   [0. Planteamiento Teórico del Modelo ETSIR](#seccion-2-0)
--   [1. Preparación de Datos para Modelado](#seccion-2-1)
--   [2. Funciones Core del Modelo ETSIR](#seccion-2-2)
--   [3. Ajuste ETSIR One-Step-Ahead (OSA)](#seccion-2-3)
--   [4. Diagnóstico del Modelo OSA](#seccion-2-4)
--   [5. Estimación MSA (Multiple-Step-Ahead)](#seccion-2-5)
--   [6. Resultados Comparativos](#seccion-2-6)
--   [7. Validación Biológica y Estadística](#seccion-2-7)
--   [8. Resumen Final del Módulo II](#seccion-2-8)
+-   [0. Planteamiento Teórico del Modelo ETSIR](#seccion-3-0)
+-   [1. Preparación de Datos para Modelado](#seccion-3-1)
+-   [2. Funciones Core del Modelo ETSIR](#seccion-3-2)
+-   [3. Ajuste ETSIR One-Step-Ahead (OSA)](#seccion-3-3)
+-   [4. Diagnóstico del Modelo OSA](#seccion-3-4)
+-   [5. Estimación MSA (Multiple-Step-Ahead)](#seccion-3-5)
+-   [6. Resultados Comparativos](#seccion-3-6)
+-   [7. Validación Biológica y Estadística](#seccion-3-7)
+-   [8. Resumen Final del Módulo II](#seccion-3-8)
 :::
 
-::: {#seccion-2-0 .content-card}
+::: {#seccion-3-0 .content-card}
 ### 0. Planteamiento Teórico del Modelo ETSIR
 
 #### 0.1 Del Modelo SIR al ETSIR: Cadena de Derivación
@@ -111,10 +111,10 @@ $$\boldsymbol{\theta} = (c_0,\, c_I,\, c_P,\, c_P',\, c_T,\, c_T',\, H_P,\, H_T,
 
 :::
 
-::: {#seccion-2-1 .content-card}
+::: {#seccion-3-1 .content-card}
 ### 1. Preparación de Datos para Modelado
 
-```{r bloque-1-preparacion}
+```{r bloque-1-preparacion2}
 #==============================================================================
 # BLOQUE 1: PREPARACIÓN Y DIVISIÓN TRAIN/TEST PARA MODELADO
 #==============================================================================
@@ -302,7 +302,7 @@ cat("  → Las predicciones se validarán en test_data.\n")
 
 :::
 
-::: {#seccion-2-2 .content-card}
+::: {#seccion-3-2 .content-card}
 ### 2. Funciones Core del Modelo ETSIR
 
 <div class="rmdnote">
@@ -314,7 +314,7 @@ que usan los datos (`ajustar_etsir_osa`) se modificarán para trabajar con `trai
 
 #### 2.1 Función de Predicción ETSIR
 
-```{r bloque-2-etsir-pred}
+```{r bloque-2-etsir-pred2}
 #==============================================================================
 # BLOQUE 2.1: FUNCIÓN DE PREDICCIÓN ETSIR (SIN CAMBIOS)
 #==============================================================================
@@ -354,7 +354,7 @@ cat("✔ Función etsir_pred() definida correctamente (sin cambios).\n")
 
 #### 2.2 Función de Verosimilitud Negativa (NegBin)
 
-```{r bloque-2-etsir-nll}
+```{r bloque-2-etsir-nll2}
 #==============================================================================
 # BLOQUE 2.2: FUNCIÓN DE VEROSIMILITUD NEGATIVA (SIN CAMBIOS)
 #==============================================================================
@@ -410,12 +410,12 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 
 :::
 
-::: {#seccion-2-3 .content-card}
+::: {#seccion-3-3 .content-card}
 ### 3. Ajuste ETSIR One-Step-Ahead (OSA)
 
 #### 3.1 Función de Ajuste por País (Modificada para Train Data)
 
-```{r bloque-3-ajustar-osa}
+```{r bloque-3-ajustar-osa2}
 #==============================================================================
 # BLOQUE 3.1: FUNCIÓN DE AJUSTE ETSIR-OSA POR PAÍS (MODIFICADA)
 #==============================================================================
@@ -1068,7 +1068,7 @@ ajustar_etsir_osa <- function(train_data_pais, test_data_pais,
 
 #### 3.2 Ejecución del Ajuste OSA con Train/Test
 
-```{r bloque-3-ejecucion-osa}
+```{r bloque-3-ejecucion-osa2}
 #==============================================================================
 # BLOQUE 3.2: EJECUCIÓN DEL AJUSTE OSA CON DIVISIÓN TRAIN/TEST
 #==============================================================================
@@ -1146,12 +1146,12 @@ tabla_metricas_osa %>%
 
 :::
 
-::: {#seccion-2-4 .content-card}
+::: {#seccion-3-4 .content-card}
 ### 4. Diagnóstico del Modelo OSA
 
 #### 4.1 Series Observadas vs. Predichas (Train y Test)
 
-```{r bloque-4-diagnostico-series}
+```{r bloque-4-diagnostico-series2}
 #==============================================================================
 # BLOQUE 4.1: DIAGNÓSTICO VISUAL - SERIES OBSERVADAS VS. PREDICHAS (TRAIN/TEST)
 #==============================================================================
@@ -1212,7 +1212,7 @@ ggplot(datos_predichos_completos, aes(x = fecha_semana)) +
 
 #### 4.2 Análisis de Residuos (Train y Test Separados)
 
-```{r bloque-4-diagnostico-residuos}
+```{r bloque-4-diagnostico-residuos2}
 #==============================================================================
 # BLOQUE 4.2: DIAGNÓSTICO DE RESIDUOS (TRAIN Y TEST SEPARADOS)
 #==============================================================================
@@ -1266,7 +1266,7 @@ resumen_residuos %>%
 
 #### 4.3 ACF de Residuos (Train y Test)
 
-```{r bloque-4-diagnostico-acf}
+```{r bloque-4-diagnostico-acf2}
 #==============================================================================
 # BLOQUE 4.3: ACF DE RESIDUOS (VERIFICAR INDEPENDENCIA EN TRAIN Y TEST)
 #==============================================================================
@@ -1324,7 +1324,7 @@ cat("  → Comparar ACF Train vs Test revela si la estructura temporal cambia.\n
 :::
 
 
-::: {#seccion-2-5 .content-card}
+::: {#seccion-3-5 .content-card}
 ### 5. Estimación MSA (Multiple-Step-Ahead) con Validación Temporal
 
 <div class="rmdnote">
@@ -1350,7 +1350,7 @@ trayectoria dinámica completa, matching automático de la función de autocovar
 
 #### 5.1 Función de Pérdida MSA (Negative Log-Likelihood Multi-Paso)
 
-```{r bloque-5-msa-nll}
+```{r bloque-5-msa-nll2}
 #==============================================================================
 # BLOQUE 5.1: FUNCIÓN DE PÉRDIDA MSA - NEGATIVE LOG-LIKELIHOOD MULTI-PASO
 #==============================================================================
@@ -1445,7 +1445,7 @@ cat("✔ Función msa_negloglik_core() definida correctamente (sin cambios).\n")
 
 #### 5.2 Función de Ajuste MSA por País (Modificada para Train/Test)
 
-```{r bloque-5-ajustar-msa}
+```{r bloque-5-ajustar-msa2}
 #==============================================================================
 # BLOQUE 5.2: FUNCIÓN DE AJUSTE MSA POR PAÍS Y DISTRIBUCIÓN (MODIFICADA)
 #==============================================================================
@@ -1810,7 +1810,7 @@ ajustar_msa_distribucion <- function(train_data_pais, test_data_pais, pais_nombr
 
 #### 5.3 Ejecución: Comparación Poisson vs. NegBin con Train/Test
 
-```{r bloque-5-ejecucion-msa}
+```{r bloque-5-ejecucion-msa2}
 #==============================================================================
 # BLOQUE 5.3: EJECUCIÓN - AJUSTAR POISSON Y NEGBIN CON DIVISIÓN TRAIN/TEST
 #==============================================================================
@@ -1875,12 +1875,12 @@ cat("  Observaciones de validación:", nrow(datos_validacion_todas), "\n")
 
 :::
 
-::: {#seccion-2-6 .content-card}
+::: {#seccion-3-6 .content-card}
 ### 6. Resultados Comparativos con Validación Temporal
 
 #### 6.1 Tabla Comparativa Poisson vs. NegBin (Train/Test)
 
-```{r bloque-6-tabla-comparativa}
+```{r bloque-6-tabla-comparativa2}
 #==============================================================================
 # BLOQUE 6.1: TABLA COMPARATIVA Y SELECCIÓN AUTOMÁTICA
 #==============================================================================
@@ -1961,7 +1961,7 @@ tabla1_html <- tabla_comparativa %>%
 
 #### 6.2 Visualización de Series Ajustadas (Train y Test)
 
-```{r bloque-6-graficos-series}
+```{r bloque-6-graficos-series2}
 #==============================================================================
 # BLOQUE 6.2: GRÁFICOS COMPARATIVOS DE SERIES AJUSTADAS (TRAIN/TEST)
 #==============================================================================
@@ -2070,7 +2070,7 @@ if (nrow(datos_validacion_todas) > 0) {
 
 #### 6.3 Diagnóstico de Residuos (Train y Test Separados)
 
-```{r bloque-6-diagnostico-residuos}
+```{r bloque-6-diagnostico-residuos2}
 #==============================================================================
 # BLOQUE 6.3: DIAGNÓSTICO DE RESIDUOS (TRAIN Y TEST SEPARADOS)
 #==============================================================================
@@ -2142,7 +2142,7 @@ if (nrow(datos_validacion_todas) > 0) {
 
 #### 6.4 ACF de Residuos (Train y Test por Distribución)
 
-```{r bloque-6-acf-residuos}
+```{r bloque-6-acf-residuos2}
 #==============================================================================
 # BLOQUE 6.4: ACF DE RESIDUOS (VERIFICAR INDEPENDENCIA EN TRAIN Y TEST)
 #==============================================================================
@@ -2220,7 +2220,7 @@ if (nrow(datos_validacion_todas) > 30) {
 
 #### 6.5 Resumen Ejecutivo de Validación Temporal
 
-```{r bloque-6-resumen-ejecutivo}
+```{r bloque-6-resumen-ejecutivo2}
 #==============================================================================
 # BLOQUE 6.5: RESUMEN EJECUTIVO DE VALIDACIÓN TEMPORAL
 #==============================================================================
