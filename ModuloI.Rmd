@@ -78,6 +78,8 @@ cat("✔ Entorno configurado correctamente.\n")
 cat("  Países:", paste(PAISES_ISO, collapse = ", "), "\n")
 cat("  Período:", ANIO_INICIO, "-", ANIO_FIN, "\n")
 cat("  Ventana de inmunidad K_I:", K_I, "semanas\n")
+
+
 ```
 :::
 

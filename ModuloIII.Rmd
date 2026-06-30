@@ -436,8 +436,326 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   - Predicción en test_data (out-of-sample)
 #   - Comparación de R² y RMSE entre ambos conjuntos
 #==============================================================================
+
+ajustar_etsir_osa <- function(train_data_pais, test_data_pais, pais_nombre = NULL) {
+
+  if (is.null(pais_nombre)) pais_nombre <- unique(train_data_pais$pais)[1]
+  cat("\n═══════════════════════════════════════════════════════\n")
+  cat("  Ajustando ETSIR One-Step-Ahead para:", pais_nombre, "\n")
+  cat("═══════════════════════════════════════════════════════\n")
+
+  # ---------------------------------------------------------
+  # PASO 0: Validación exhaustiva de datos
+  # ---------------------------------------------------------
+  cat("  [0/6] Validando datos de entrada...\n")
+
+  vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
+  vars_faltantes <- setdiff(vars_requeridas, colnames(train_data_pais))
+
+  if (length(vars_faltantes) > 0) {
+    stop("Variables faltantes en ", pais_nombre, ": ",
+         paste(vars_faltantes, collapse = ", "))
+  }
+
+  # Validar train_data
+  train_clean <- train_data_pais %>%
+    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+           !is.na(temp_opt), !is.na(precip_opt))
+
+  # Validar test_data
+  test_clean <- test_data_pais %>%
+    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
+           !is.na(temp_opt), !is.na(precip_opt))
+
+  n_train <- nrow(train_clean)
+  n_test <- nrow(test_clean)
+
+  if (n_train == 0) {
+    stop("No hay datos válidos en TRAIN para ", pais_nombre)
+  }
+
+  if (n_test == 0) {
+    warning("No hay datos válidos en TEST para ", pais_nombre)
+  }
+
+  if (sd(train_clean$I_t, na.rm = TRUE) == 0) {
+    stop("I_t no tiene variación en TRAIN para ", pais_nombre)
+  }
+
+  cat("    ✔ Train:", n_train, "observaciones | Test:", n_test, "observaciones\n")
+
+  # ---------------------------------------------------------
+  # PASO 1: Grid de umbrales (H_T, H_P) - SOLO EN TRAIN
+  # ---------------------------------------------------------
+  cat("  [1/6] Construyendo grid de umbrales (solo train)...\n")
+
+  HT_candidatos <- quantile(train_clean$temp_opt,
+                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90),
+                            na.rm = TRUE)
+  HP_candidatos <- quantile(train_clean$precip_opt,
+                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90),
+                            na.rm = TRUE)
+
+  grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
+  cat("    Grid:", nrow(grid_umbrales), "combinaciones\n")
+
+  resultados_grid <- data.frame(
+    HT = numeric(), HP = numeric(),
+    AIC = numeric(), logLik = numeric(),
+    c0 = numeric(), cI = numeric(),
+    cP = numeric(), cP2 = numeric(),
+    cT = numeric(), cT2 = numeric(),
+    theta = numeric(),
+    convergio = logical()
+  )
+
+  # ---------------------------------------------------------
+  # PASO 2: Ajustar glm.nb en grid - SOLO EN TRAIN
+  # ---------------------------------------------------------
+  cat("  [2/6] Ajustando modelos en grid (solo train)...\n")
+
+  n_convergio <- 0
+
+  for (i in seq_len(nrow(grid_umbrales))) {
+    HT_cand <- grid_umbrales$HT[i]
+    HP_cand <- grid_umbrales$HP[i]
+
+    # Construir variables piecewise SOLO para train
+    train_tmp <- train_clean %>%
+      mutate(
+        temp_tramo1   = temp_opt,
+        temp_tramo2   = pmax(temp_opt - HT_cand, 0),
+        precip_tramo1 = precip_opt,
+        precip_tramo2 = pmax(precip_opt - HP_cand, 0)
+      )
+
+    mod <- tryCatch({
+      MASS::glm.nb(
+        I_t ~ I_t_1 + acumulado_KI +
+              temp_tramo1 + temp_tramo2 +
+              precip_tramo1 + precip_tramo2,
+        data = train_tmp,
+        control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+        init.theta = 1.5,
+        link = "log"
+      )
+    }, error = function(e) {
+      tryCatch({
+        MASS::glm.nb(
+          I_t ~ I_t_1 + acumulado_KI +
+                temp_tramo1 + temp_tramo2 +
+                precip_tramo1 + precip_tramo2,
+          data = train_tmp,
+          control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
+          link = "log"
+        )
+      }, error = function(e2) {
+        tryCatch({
+          glm(
+            I_t ~ I_t_1 + acumulado_KI +
+                 temp_tramo1 + temp_tramo2 +
+                precip_tramo1 + precip_tramo2,
+            data = train_tmp,
+            family = poisson(link = "log"),
+            control = glm.control(maxit = 500)
+          )
+        }, error = function(e3) NULL)
+      })
+    })
+
+    if (!is.null(mod) && !inherits(mod, "try-error")) {
+      coefs <- coef(mod)
+
+      if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
+        c0_val  <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
+        cI_val  <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
+        cP_val  <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
+        cP2_val <- if ("precip_tramo2" %in% names(coefs)) coefs["precip_tramo2"] else NA
+        cT_val  <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
+        cT2_val <- if ("temp_tramo2" %in% names(coefs)) coefs["temp_tramo2"] else NA
+
+        theta_val <- if (inherits(mod, "negbin")) mod$theta else NA
+
+        resultados_grid <- rbind(resultados_grid, data.frame(
+          HT = HT_cand, HP = HP_cand,
+          AIC = AIC(mod),
+          logLik = as.numeric(logLik(mod)),
+          c0 = c0_val, cI = cI_val,
+          cP = cP_val, cP2 = cP2_val,
+          cT = cT_val, cT2 = cT2_val,
+          theta = theta_val,
+          convergio = TRUE
+        ))
+
+        n_convergio <- n_convergio + 1
+      }
+    }
+  }
+
+  cat("    ✔ Modelos convergidos:", n_convergio, "/", nrow(grid_umbrales), "\n")
+
+  if (nrow(resultados_grid) == 0) {
+    warning("Ningún modelo convergió para ", pais_nombre)
+    return(NULL)
+  }
+
+  # ---------------------------------------------------------
+  # PASO 3: Seleccionar mejor modelo por AIC
+  # ---------------------------------------------------------
+  cat("  [3/6] Seleccionando mejor modelo por AIC...\n")
+
+  mejor_idx <- which.min(resultados_grid$AIC)
+  mejor <- resultados_grid[mejor_idx, ]
+
+  cat("    ✔ Mejor modelo:\n")
+  cat("      H_T =", round(mejor$HT, 2), "°C | H_P =", round(mejor$HP, 2), "mm\n")
+  cat("      AIC =", round(mejor$AIC, 2), "\n")
+  if (!is.na(mejor$theta)) {
+    cat("      θ (dispersión) =", round(mejor$theta, 3), "\n")
+  }
+
+  # ---------------------------------------------------------
+  # PASO 4: Reconstruir modelo final con train_data
+  # ---------------------------------------------------------
+  cat("  [4/6] Reconstruyendo modelo final (solo train)...\n")
+
+  train_finales <- train_clean %>%
+    mutate(
+      temp_tramo1   = temp_opt,
+      temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+      precip_tramo1 = precip_opt,
+      precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+    )
+
+  modelo_final <- tryCatch({
+    if (!is.na(mejor$theta)) {
+      MASS::glm.nb(
+        I_t ~ I_t_1 + acumulado_KI +
+              temp_tramo1 + temp_tramo2 +
+              precip_tramo1 + precip_tramo2,
+        data = train_finales,
+        control = glm.control(maxit = 1000),
+        init.theta = mejor$theta
+      )
+    } else {
+      glm(
+        I_t ~ I_t_1 + acumulado_KI +
+              temp_tramo1 + temp_tramo2 +
+              precip_tramo1 + precip_tramo2,
+        data = train_finales,
+        family = poisson(link = "log"),
+        control = glm.control(maxit = 1000)
+      )
+    }
+  }, error = function(e) {
+    warning("No se pudo reconstruir el modelo final para ", pais_nombre)
+    NULL
+  })
+
+  if (is.null(modelo_final)) return(NULL)
+
+  # ---------------------------------------------------------
+  # PASO 5: Predicciones y métricas en TRAIN (in-sample)
+  # ---------------------------------------------------------
+  cat("  [5/6] Calculando predicciones y métricas en TRAIN...\n")
+
+  train_finales$mu_osa <- predict(modelo_final, type = "response")
+  train_finales$residuo_osa <- train_finales$I_t - train_finales$mu_osa
+
+  ss_res_train <- sum(train_finales$residuo_osa^2, na.rm = TRUE)
+  ss_tot_train <- sum((train_finales$I_t - mean(train_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+  R2_train <- 1 - ss_res_train / ss_tot_train
+  RMSE_train <- sqrt(mean(train_finales$residuo_osa^2, na.rm = TRUE))
+
+  cat("    ✔ Métricas TRAIN:\n")
+  cat("      R²   =", round(R2_train, 4), "\n")
+  cat("      RMSE =", round(RMSE_train, 2), "\n")
+
+  # ---------------------------------------------------------
+  # PASO 6: Predicciones y métricas en TEST (out-of-sample)
+  # ---------------------------------------------------------
+  cat("  [6/6] Calculando predicciones y métricas en TEST...\n")
+
+  if (n_test > 0) {
+    test_finales <- test_clean %>%
+      mutate(
+        temp_tramo1   = temp_opt,
+        temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
+        precip_tramo1 = precip_opt,
+        precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
+      )
+
+    test_finales$mu_osa <- predict(modelo_final, newdata = test_finales, type = "response")
+    test_finales$residuo_osa <- test_finales$I_t - test_finales$mu_osa
+
+    ss_res_test <- sum(test_finales$residuo_osa^2, na.rm = TRUE)
+    ss_tot_test <- sum((test_finales$I_t - mean(test_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
+    R2_test <- 1 - ss_res_test / ss_tot_test
+    RMSE_test <- sqrt(mean(test_finales$residuo_osa^2, na.rm = TRUE))
+
+    cat("    ✔ Métricas TEST:\n")
+    cat("      R²   =", round(R2_test, 4), "\n")
+    cat("      RMSE =", round(RMSE_test, 2), "\n")
+
+    # Calcular degradación de performance
+    degradacion_R2 <- R2_train - R2_test
+    degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
+
+    cat("    ✔ Degradación Train→Test:\n")
+    cat("      ΔR²   =", round(degradacion_R2, 4), "\n")
+    cat("      ΔRMSE =", round(degradacion_RMSE, 1), "%\n")
+  } else {
+    test_finales <- NULL
+    R2_test <- NA
+    RMSE_test <- NA
+    degradacion_R2 <- NA
+    degradacion_RMSE <- NA
+    cat("    ⚠ No hay datos de test disponibles\n")
+  }
+
+  cat("\n")
+
+  return(list(
+    pais           = pais_nombre,
+    modelo         = modelo_final,
+    train_data     = train_finales,
+    test_data      = test_finales,
+    umbrales       = c(HT = mejor$HT, HP = mejor$HP),
+    coeficientes   = c(c0 = mejor$c0, cI = mejor$cI,
+                       cP = mejor$cP, cP2 = mejor$cP2,
+                       cT = mejor$cT, cT2 = mejor$cT2),
+    theta          = mejor$theta,
+    metricas_train = c(AIC = mejor$AIC, R2 = R2_train, RMSE = RMSE_train),
+    metricas_test  = c(R2 = R2_test, RMSE = RMSE_test),
+    degradacion    = c(delta_R2 = degradacion_R2, delta_RMSE_pct = degradacion_RMSE),
+    grid_completo  = resultados_grid
+  ))
+}
+
+
 # 
-# ajustar_etsir_osa <- function(train_data_pais, test_data_pais, pais_nombre = NULL) {
+# 
+# ajustar_etsir_osa <- function(train_data_pais, test_data_pais, 
+#                               pais_nombre = NULL,
+#                               timeout_sec = 300,      # tiempo máximo total
+#                               show_progress = TRUE) { # barra de progreso
+#   
+#   # Si se pide timeout, usar withTimeout
+#   if (requireNamespace("R.utils", quietly = TRUE)) {
+#     return(R.utils::withTimeout({
+#       .ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
+#                                   pais_nombre, show_progress)
+#     }, timeout = timeout_sec, onTimeout = "error"))
+#   } else {
+#     warning("Paquete R.utils no instalado. No se aplicará timeout.")
+#     return(.ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
+#                                       pais_nombre, show_progress))
+#   }
+# }
+# 
+# # Función interna (sin timeout) que hace el trabajo real
+# .ajustar_etsir_osa_interno <- function(train_data_pais, test_data_pais, 
+#                                         pais_nombre, show_progress) {
 #   
 #   if (is.null(pais_nombre)) pais_nombre <- unique(train_data_pais$pais)[1]
 #   cat("\n═══════════════════════════════════════════════════════\n")
@@ -457,12 +775,10 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #          paste(vars_faltantes, collapse = ", "))
 #   }
 #   
-#   # Validar train_data
 #   train_clean <- train_data_pais %>%
 #     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
 #            !is.na(temp_opt), !is.na(precip_opt))
 #   
-#   # Validar test_data
 #   test_clean <- test_data_pais %>%
 #     filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
 #            !is.na(temp_opt), !is.na(precip_opt))
@@ -470,22 +786,15 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   n_train <- nrow(train_clean)
 #   n_test <- nrow(test_clean)
 #   
-#   if (n_train == 0) {
-#     stop("No hay datos válidos en TRAIN para ", pais_nombre)
-#   }
-#   
-#   if (n_test == 0) {
-#     warning("No hay datos válidos en TEST para ", pais_nombre)
-#   }
-#   
-#   if (sd(train_clean$I_t, na.rm = TRUE) == 0) {
+#   if (n_train == 0) stop("No hay datos válidos en TRAIN para ", pais_nombre)
+#   if (n_test == 0) warning("No hay datos válidos en TEST para ", pais_nombre)
+#   if (sd(train_clean$I_t, na.rm = TRUE) == 0) 
 #     stop("I_t no tiene variación en TRAIN para ", pais_nombre)
-#   }
 #   
-#   cat("    ✔ Train:", n_train, "observaciones | Test:", n_test, "observaciones\n")
+#   cat("    ✔ Train:", n_train, "obs | Test:", n_test, "obs\n")
 #   
 #   # ---------------------------------------------------------
-#   # PASO 1: Grid de umbrales (H_T, H_P) - SOLO EN TRAIN
+#   # PASO 1: Grid de umbrales (se mantiene igual)
 #   # ---------------------------------------------------------
 #   cat("  [1/6] Construyendo grid de umbrales (solo train)...\n")
 #   
@@ -497,7 +806,8 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #                             na.rm = TRUE)
 #   
 #   grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
-#   cat("    Grid:", nrow(grid_umbrales), "combinaciones\n")
+#   n_grid <- nrow(grid_umbrales)
+#   cat("    Grid:", n_grid, "combinaciones\n")
 #   
 #   resultados_grid <- data.frame(
 #     HT = numeric(), HP = numeric(), 
@@ -510,17 +820,21 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   )
 #   
 #   # ---------------------------------------------------------
-#   # PASO 2: Ajustar glm.nb en grid - SOLO EN TRAIN
+#   # PASO 2: Ajustar modelos en grid con mejor manejo de NegBin
 #   # ---------------------------------------------------------
 #   cat("  [2/6] Ajustando modelos en grid (solo train)...\n")
 #   
-#   n_convergio <- 0
+#   if (show_progress) {
+#     pb <- txtProgressBar(min = 0, max = n_grid, style = 3)
+#   }
 #   
-#   for (i in seq_len(nrow(grid_umbrales))) {
+#   n_convergio <- 0
+#   n_fallos <- 0
+#   
+#   for (i in seq_len(n_grid)) {
 #     HT_cand <- grid_umbrales$HT[i]
 #     HP_cand <- grid_umbrales$HP[i]
 #     
-#     # Construir variables piecewise SOLO para train
 #     train_tmp <- train_clean %>%
 #       mutate(
 #         temp_tramo1   = temp_opt,
@@ -529,43 +843,54 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #         precip_tramo2 = pmax(precip_opt - HP_cand, 0)
 #       )
 #     
+#     # --- Intentar NegBin con inicialización adaptativa ---
+#     # Estimar theta por momentos (si var > mean)
+#     mu0 <- mean(train_tmp$I_t)
+#     var0 <- var(train_tmp$I_t)
+#     theta_init <- if (var0 > mu0) mu0^2 / (var0 - mu0) else 1.5
+#     theta_init <- max(theta_init, 0.1)
+#     
 #     mod <- tryCatch({
 #       MASS::glm.nb(
 #         I_t ~ I_t_1 + acumulado_KI + 
 #               temp_tramo1 + temp_tramo2 + 
 #               precip_tramo1 + precip_tramo2,
 #         data = train_tmp,
-#         control = glm.control(maxit = 500, warn.complete.convergence = FALSE),
-#         init.theta = 1.5,
+#         init.theta = theta_init,
+#         control = glm.control(maxit = 2000, epsilon = 1e-8),
 #         link = "log"
 #       )
 #     }, error = function(e) {
+#       # Segundo intento con otro valor
 #       tryCatch({
 #         MASS::glm.nb(
 #           I_t ~ I_t_1 + acumulado_KI + 
 #                 temp_tramo1 + temp_tramo2 + 
 #                 precip_tramo1 + precip_tramo2,
 #           data = train_tmp,
-#           control = glm.control(maxit = 500, warn.complete.convergence = FALSE), 
+#           init.theta = 0.5,
+#           control = glm.control(maxit = 2000, epsilon = 1e-8),
 #           link = "log"
 #         )
 #       }, error = function(e2) {
+#         # Fallback a Poisson si NegBin no converge
 #         tryCatch({
 #           glm(
 #             I_t ~ I_t_1 + acumulado_KI + 
 #                  temp_tramo1 + temp_tramo2 + 
-#                 precip_tramo1 + precip_tramo2,
+#                  precip_tramo1 + precip_tramo2,
 #             data = train_tmp,
 #             family = poisson(link = "log"),
-#             control = glm.control(maxit = 500)
+#             control = glm.control(maxit = 2000, epsilon = 1e-8)
 #           )
 #         }, error = function(e3) NULL)
 #       })
 #     })
 #     
-#     if (!is.null(mod) && !inherits(mod, "try-error")) {
+#     # Si el modelo es válido, guardar resultados
+#     if (!is.null(mod) && !inherits(mod, "try-error") && 
+#         (mod$converged || inherits(mod, "glm"))) {
 #       coefs <- coef(mod)
-#       
 #       if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
 #         c0_val  <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
 #         cI_val  <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
@@ -586,13 +911,21 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #           theta = theta_val,
 #           convergio = TRUE
 #         ))
-#         
 #         n_convergio <- n_convergio + 1
+#       } else {
+#         n_fallos <- n_fallos + 1
 #       }
+#     } else {
+#       n_fallos <- n_fallos + 1
 #     }
+#     
+#     if (show_progress) setTxtProgressBar(pb, i)
 #   }
 #   
-#   cat("    ✔ Modelos convergidos:", n_convergio, "/", nrow(grid_umbrales), "\n")
+#   if (show_progress) close(pb)
+#   
+#   cat("    ✔ Modelos convergidos:", n_convergio, "/", n_grid, 
+#       " | Fallos:", n_fallos, "\n")
 #   
 #   if (nrow(resultados_grid) == 0) {
 #     warning("Ningún modelo convergió para ", pais_nombre)
@@ -615,7 +948,7 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   }
 #   
 #   # ---------------------------------------------------------
-#   # PASO 4: Reconstruir modelo final con train_data
+#   # PASO 4: Reconstruir modelo final
 #   # ---------------------------------------------------------
 #   cat("  [4/6] Reconstruyendo modelo final (solo train)...\n")
 #   
@@ -634,7 +967,7 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #               temp_tramo1 + temp_tramo2 + 
 #               precip_tramo1 + precip_tramo2,
 #         data = train_finales,
-#         control = glm.control(maxit = 1000),
+#         control = glm.control(maxit = 2000, epsilon = 1e-8),
 #         init.theta = mejor$theta
 #       )
 #     } else {
@@ -644,7 +977,7 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #               precip_tramo1 + precip_tramo2,
 #         data = train_finales,
 #         family = poisson(link = "log"),
-#         control = glm.control(maxit = 1000)
+#         control = glm.control(maxit = 2000, epsilon = 1e-8)
 #       )
 #     }
 #   }, error = function(e) {
@@ -655,7 +988,7 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   if (is.null(modelo_final)) return(NULL)
 #   
 #   # ---------------------------------------------------------
-#   # PASO 5: Predicciones y métricas en TRAIN (in-sample)
+#   # PASO 5: Métricas en TRAIN
 #   # ---------------------------------------------------------
 #   cat("  [5/6] Calculando predicciones y métricas en TRAIN...\n")
 #   
@@ -672,7 +1005,7 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #   cat("      RMSE =", round(RMSE_train, 2), "\n")
 #   
 #   # ---------------------------------------------------------
-#   # PASO 6: Predicciones y métricas en TEST (out-of-sample)
+#   # PASO 6: Métricas en TEST
 #   # ---------------------------------------------------------
 #   cat("  [6/6] Calculando predicciones y métricas en TEST...\n")
 #   
@@ -697,7 +1030,6 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #     cat("      R²   =", round(R2_test, 4), "\n")
 #     cat("      RMSE =", round(RMSE_test, 2), "\n")
 #     
-#     # Calcular degradación de performance
 #     degradacion_R2 <- R2_train - R2_test
 #     degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
 #     
@@ -731,338 +1063,6 @@ cat("✔ Función etsir_nll() definida correctamente (sin cambios).\n")
 #     grid_completo  = resultados_grid
 #   ))
 # }
-# 
-
-
-
-ajustar_etsir_osa <- function(train_data_pais, test_data_pais, 
-                              pais_nombre = NULL,
-                              timeout_sec = 300,      # tiempo máximo total
-                              show_progress = TRUE) { # barra de progreso
-  
-  # Si se pide timeout, usar withTimeout
-  if (requireNamespace("R.utils", quietly = TRUE)) {
-    return(R.utils::withTimeout({
-      .ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
-                                  pais_nombre, show_progress)
-    }, timeout = timeout_sec, onTimeout = "error"))
-  } else {
-    warning("Paquete R.utils no instalado. No se aplicará timeout.")
-    return(.ajustar_etsir_osa_interno(train_data_pais, test_data_pais, 
-                                      pais_nombre, show_progress))
-  }
-}
-
-# Función interna (sin timeout) que hace el trabajo real
-.ajustar_etsir_osa_interno <- function(train_data_pais, test_data_pais, 
-                                        pais_nombre, show_progress) {
-  
-  if (is.null(pais_nombre)) pais_nombre <- unique(train_data_pais$pais)[1]
-  cat("\n═══════════════════════════════════════════════════════\n")
-  cat("  Ajustando ETSIR One-Step-Ahead para:", pais_nombre, "\n")
-  cat("═══════════════════════════════════════════════════════\n")
-  
-  # ---------------------------------------------------------
-  # PASO 0: Validación exhaustiva de datos
-  # ---------------------------------------------------------
-  cat("  [0/6] Validando datos de entrada...\n")
-  
-  vars_requeridas <- c("I_t", "I_t_1", "acumulado_KI", "temp_opt", "precip_opt")
-  vars_faltantes <- setdiff(vars_requeridas, colnames(train_data_pais))
-  
-  if (length(vars_faltantes) > 0) {
-    stop("Variables faltantes en ", pais_nombre, ": ", 
-         paste(vars_faltantes, collapse = ", "))
-  }
-  
-  train_clean <- train_data_pais %>%
-    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
-           !is.na(temp_opt), !is.na(precip_opt))
-  
-  test_clean <- test_data_pais %>%
-    filter(!is.na(I_t), !is.na(I_t_1), !is.na(acumulado_KI),
-           !is.na(temp_opt), !is.na(precip_opt))
-  
-  n_train <- nrow(train_clean)
-  n_test <- nrow(test_clean)
-  
-  if (n_train == 0) stop("No hay datos válidos en TRAIN para ", pais_nombre)
-  if (n_test == 0) warning("No hay datos válidos en TEST para ", pais_nombre)
-  if (sd(train_clean$I_t, na.rm = TRUE) == 0) 
-    stop("I_t no tiene variación en TRAIN para ", pais_nombre)
-  
-  cat("    ✔ Train:", n_train, "obs | Test:", n_test, "obs\n")
-  
-  # ---------------------------------------------------------
-  # PASO 1: Grid de umbrales (se mantiene igual)
-  # ---------------------------------------------------------
-  cat("  [1/6] Construyendo grid de umbrales (solo train)...\n")
-  
-  HT_candidatos <- quantile(train_clean$temp_opt, 
-                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
-                            na.rm = TRUE)
-  HP_candidatos <- quantile(train_clean$precip_opt, 
-                            probs = c(0.10, 0.25, 0.50, 0.75, 0.90), 
-                            na.rm = TRUE)
-  
-  grid_umbrales <- expand.grid(HT = HT_candidatos, HP = HP_candidatos)
-  n_grid <- nrow(grid_umbrales)
-  cat("    Grid:", n_grid, "combinaciones\n")
-  
-  resultados_grid <- data.frame(
-    HT = numeric(), HP = numeric(), 
-    AIC = numeric(), logLik = numeric(),
-    c0 = numeric(), cI = numeric(),
-    cP = numeric(), cP2 = numeric(),
-    cT = numeric(), cT2 = numeric(),
-    theta = numeric(),
-    convergio = logical()
-  )
-  
-  # ---------------------------------------------------------
-  # PASO 2: Ajustar modelos en grid con mejor manejo de NegBin
-  # ---------------------------------------------------------
-  cat("  [2/6] Ajustando modelos en grid (solo train)...\n")
-  
-  if (show_progress) {
-    pb <- txtProgressBar(min = 0, max = n_grid, style = 3)
-  }
-  
-  n_convergio <- 0
-  n_fallos <- 0
-  
-  for (i in seq_len(n_grid)) {
-    HT_cand <- grid_umbrales$HT[i]
-    HP_cand <- grid_umbrales$HP[i]
-    
-    train_tmp <- train_clean %>%
-      mutate(
-        temp_tramo1   = temp_opt,
-        temp_tramo2   = pmax(temp_opt - HT_cand, 0),
-        precip_tramo1 = precip_opt,
-        precip_tramo2 = pmax(precip_opt - HP_cand, 0)
-      )
-    
-    # --- Intentar NegBin con inicialización adaptativa ---
-    # Estimar theta por momentos (si var > mean)
-    mu0 <- mean(train_tmp$I_t)
-    var0 <- var(train_tmp$I_t)
-    theta_init <- if (var0 > mu0) mu0^2 / (var0 - mu0) else 1.5
-    theta_init <- max(theta_init, 0.1)
-    
-    mod <- tryCatch({
-      MASS::glm.nb(
-        I_t ~ I_t_1 + acumulado_KI + 
-              temp_tramo1 + temp_tramo2 + 
-              precip_tramo1 + precip_tramo2,
-        data = train_tmp,
-        init.theta = theta_init,
-        control = glm.control(maxit = 2000, epsilon = 1e-8),
-        link = "log"
-      )
-    }, error = function(e) {
-      # Segundo intento con otro valor
-      tryCatch({
-        MASS::glm.nb(
-          I_t ~ I_t_1 + acumulado_KI + 
-                temp_tramo1 + temp_tramo2 + 
-                precip_tramo1 + precip_tramo2,
-          data = train_tmp,
-          init.theta = 0.5,
-          control = glm.control(maxit = 2000, epsilon = 1e-8),
-          link = "log"
-        )
-      }, error = function(e2) {
-        # Fallback a Poisson si NegBin no converge
-        tryCatch({
-          glm(
-            I_t ~ I_t_1 + acumulado_KI + 
-                 temp_tramo1 + temp_tramo2 + 
-                 precip_tramo1 + precip_tramo2,
-            data = train_tmp,
-            family = poisson(link = "log"),
-            control = glm.control(maxit = 2000, epsilon = 1e-8)
-          )
-        }, error = function(e3) NULL)
-      })
-    })
-    
-    # Si el modelo es válido, guardar resultados
-    if (!is.null(mod) && !inherits(mod, "try-error") && 
-        (mod$converged || inherits(mod, "glm"))) {
-      coefs <- coef(mod)
-      if (!is.null(coefs) && length(coefs) > 0 && all(is.finite(coefs))) {
-        c0_val  <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else NA
-        cI_val  <- if ("I_t_1" %in% names(coefs)) coefs["I_t_1"] else NA
-        cP_val  <- if ("precip_tramo1" %in% names(coefs)) coefs["precip_tramo1"] else NA
-        cP2_val <- if ("precip_tramo2" %in% names(coefs)) coefs["precip_tramo2"] else NA
-        cT_val  <- if ("temp_tramo1" %in% names(coefs)) coefs["temp_tramo1"] else NA
-        cT2_val <- if ("temp_tramo2" %in% names(coefs)) coefs["temp_tramo2"] else NA
-        
-        theta_val <- if (inherits(mod, "negbin")) mod$theta else NA
-        
-        resultados_grid <- rbind(resultados_grid, data.frame(
-          HT = HT_cand, HP = HP_cand,
-          AIC = AIC(mod),
-          logLik = as.numeric(logLik(mod)),
-          c0 = c0_val, cI = cI_val,
-          cP = cP_val, cP2 = cP2_val,
-          cT = cT_val, cT2 = cT2_val,
-          theta = theta_val,
-          convergio = TRUE
-        ))
-        n_convergio <- n_convergio + 1
-      } else {
-        n_fallos <- n_fallos + 1
-      }
-    } else {
-      n_fallos <- n_fallos + 1
-    }
-    
-    if (show_progress) setTxtProgressBar(pb, i)
-  }
-  
-  if (show_progress) close(pb)
-  
-  cat("    ✔ Modelos convergidos:", n_convergio, "/", n_grid, 
-      " | Fallos:", n_fallos, "\n")
-  
-  if (nrow(resultados_grid) == 0) {
-    warning("Ningún modelo convergió para ", pais_nombre)
-    return(NULL)
-  }
-  
-  # ---------------------------------------------------------
-  # PASO 3: Seleccionar mejor modelo por AIC
-  # ---------------------------------------------------------
-  cat("  [3/6] Seleccionando mejor modelo por AIC...\n")
-  
-  mejor_idx <- which.min(resultados_grid$AIC)
-  mejor <- resultados_grid[mejor_idx, ]
-  
-  cat("    ✔ Mejor modelo:\n")
-  cat("      H_T =", round(mejor$HT, 2), "°C | H_P =", round(mejor$HP, 2), "mm\n")
-  cat("      AIC =", round(mejor$AIC, 2), "\n")
-  if (!is.na(mejor$theta)) {
-    cat("      θ (dispersión) =", round(mejor$theta, 3), "\n")
-  }
-  
-  # ---------------------------------------------------------
-  # PASO 4: Reconstruir modelo final
-  # ---------------------------------------------------------
-  cat("  [4/6] Reconstruyendo modelo final (solo train)...\n")
-  
-  train_finales <- train_clean %>%
-    mutate(
-      temp_tramo1   = temp_opt,
-      temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
-      precip_tramo1 = precip_opt,
-      precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
-    )
-  
-  modelo_final <- tryCatch({
-    if (!is.na(mejor$theta)) {
-      MASS::glm.nb(
-        I_t ~ I_t_1 + acumulado_KI + 
-              temp_tramo1 + temp_tramo2 + 
-              precip_tramo1 + precip_tramo2,
-        data = train_finales,
-        control = glm.control(maxit = 2000, epsilon = 1e-8),
-        init.theta = mejor$theta
-      )
-    } else {
-      glm(
-        I_t ~ I_t_1 + acumulado_KI + 
-              temp_tramo1 + temp_tramo2 + 
-              precip_tramo1 + precip_tramo2,
-        data = train_finales,
-        family = poisson(link = "log"),
-        control = glm.control(maxit = 2000, epsilon = 1e-8)
-      )
-    }
-  }, error = function(e) {
-    warning("No se pudo reconstruir el modelo final para ", pais_nombre)
-    NULL
-  })
-  
-  if (is.null(modelo_final)) return(NULL)
-  
-  # ---------------------------------------------------------
-  # PASO 5: Métricas en TRAIN
-  # ---------------------------------------------------------
-  cat("  [5/6] Calculando predicciones y métricas en TRAIN...\n")
-  
-  train_finales$mu_osa <- predict(modelo_final, type = "response")
-  train_finales$residuo_osa <- train_finales$I_t - train_finales$mu_osa
-  
-  ss_res_train <- sum(train_finales$residuo_osa^2, na.rm = TRUE)
-  ss_tot_train <- sum((train_finales$I_t - mean(train_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
-  R2_train <- 1 - ss_res_train / ss_tot_train
-  RMSE_train <- sqrt(mean(train_finales$residuo_osa^2, na.rm = TRUE))
-  
-  cat("    ✔ Métricas TRAIN:\n")
-  cat("      R²   =", round(R2_train, 4), "\n")
-  cat("      RMSE =", round(RMSE_train, 2), "\n")
-  
-  # ---------------------------------------------------------
-  # PASO 6: Métricas en TEST
-  # ---------------------------------------------------------
-  cat("  [6/6] Calculando predicciones y métricas en TEST...\n")
-  
-  if (n_test > 0) {
-    test_finales <- test_clean %>%
-      mutate(
-        temp_tramo1   = temp_opt,
-        temp_tramo2   = pmax(temp_opt - mejor$HT, 0),
-        precip_tramo1 = precip_opt,
-        precip_tramo2 = pmax(precip_opt - mejor$HP, 0)
-      )
-    
-    test_finales$mu_osa <- predict(modelo_final, newdata = test_finales, type = "response")
-    test_finales$residuo_osa <- test_finales$I_t - test_finales$mu_osa
-    
-    ss_res_test <- sum(test_finales$residuo_osa^2, na.rm = TRUE)
-    ss_tot_test <- sum((test_finales$I_t - mean(test_finales$I_t, na.rm = TRUE))^2, na.rm = TRUE)
-    R2_test <- 1 - ss_res_test / ss_tot_test
-    RMSE_test <- sqrt(mean(test_finales$residuo_osa^2, na.rm = TRUE))
-    
-    cat("    ✔ Métricas TEST:\n")
-    cat("      R²   =", round(R2_test, 4), "\n")
-    cat("      RMSE =", round(RMSE_test, 2), "\n")
-    
-    degradacion_R2 <- R2_train - R2_test
-    degradacion_RMSE <- (RMSE_test - RMSE_train) / RMSE_train * 100
-    
-    cat("    ✔ Degradación Train→Test:\n")
-    cat("      ΔR²   =", round(degradacion_R2, 4), "\n")
-    cat("      ΔRMSE =", round(degradacion_RMSE, 1), "%\n")
-  } else {
-    test_finales <- NULL
-    R2_test <- NA
-    RMSE_test <- NA
-    degradacion_R2 <- NA
-    degradacion_RMSE <- NA
-    cat("    ⚠ No hay datos de test disponibles\n")
-  }
-  
-  cat("\n")
-  
-  return(list(
-    pais           = pais_nombre,
-    modelo         = modelo_final,
-    train_data     = train_finales,
-    test_data      = test_finales,
-    umbrales       = c(HT = mejor$HT, HP = mejor$HP),
-    coeficientes   = c(c0 = mejor$c0, cI = mejor$cI,
-                       cP = mejor$cP, cP2 = mejor$cP2,
-                       cT = mejor$cT, cT2 = mejor$cT2),
-    theta          = mejor$theta,
-    metricas_train = c(AIC = mejor$AIC, R2 = R2_train, RMSE = RMSE_train),
-    metricas_test  = c(R2 = R2_test, RMSE = RMSE_test),
-    degradacion    = c(delta_R2 = degradacion_R2, delta_RMSE_pct = degradacion_RMSE),
-    grid_completo  = resultados_grid
-  ))
-}
 
 ```
 
@@ -1200,7 +1200,7 @@ ggplot(datos_predichos_completos, aes(x = fecha_semana)) +
   # Etiquetas
   labs(
     title    = "Modelo ETSIR One-Step-Ahead: Validación Temporal Train/Test",
-    subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2019) y prueba (2020-2024)",
+    subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2021) y prueba (2022-2024)",
     x = "Fecha", y = "Casos semanales", 
     color = "Serie", linetype = "Conjunto"
   ) +
@@ -1913,8 +1913,8 @@ tabla1_html <- tabla_comparativa %>%
   column_spec(18:21, background = "#fadbd8", bold = TRUE) %>%  # Degradation / Diferencias
   footnote(
     general = paste(
-      "Columnas azules = métricas in-sample (train 2014-2020).",
-      "Columnas naranjas = métricas out-of-sample (test 2021-2024).",
+      "Columnas azules = métricas in-sample (train 2014-2021).",
+      "Columnas naranjas = métricas out-of-sample (test 2022-2024).",
       "Columnas rojas = degradación de performance (menor es mejor).",
       "AIC/BIC calculados sobre train_data. ΔR² = R²_Train - R²_Test.",
       "ΔRMSE_% = porcentaje de aumento del error en test vs train."
@@ -1947,7 +1947,7 @@ tabla1_html <- tabla_comparativa %>%
     column_spec(7:8, background = "#fef5e7", bold = TRUE) %>%
     column_spec(9:10, background = "#fadbd8", bold = TRUE) %>%
     footnote(
-      general = "Selección basada en AIC calculado con train_data (2014-2019). Métricas de test (2020-2024) muestran capacidad de generalización.",
+      general = "Selección basada en AIC calculado con train_data (2014-2021). Métricas de test (2022-2024) muestran capacidad de generalización.",
       general_title = "Nota: ", footnote_as_chunk = TRUE
     )
   
@@ -1972,8 +1972,8 @@ if (nrow(datos_validacion_todas) > 0) {
   datos_grafico_series <- datos_validacion_todas %>%
     mutate(
       Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
-      # Si la fecha es menor al 2020 es Train, de lo contrario es Test
-      Conjunto     = ifelse(as.Date(fecha) < as.Date("2020-01-01"), "Train", "Test")
+      # Si la fecha es menor al 2022 es Train, de lo contrario es Test
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2022-01-01"), "Train", "Test")
     )
   
   # --- 6.2.1 Series observadas vs. predichas con corte temporal ---
@@ -1986,15 +1986,15 @@ if (nrow(datos_validacion_todas) > 0) {
               linewidth = 0.6) +
     
     # Línea vertical marcando el corte train/test
-    geom_vline(xintercept = as.Date("2021-01-01"), 
+    geom_vline(xintercept = as.Date("2022-01-01"), 
                linetype = "dashed", color = "red", linewidth = 0.8) +
     
     # Anotaciones estilizadas
     annotate("text", x = as.Date("2017-01-01"), y = Inf, 
-             label = "TRAIN\n(2014-2020)", vjust = 2, hjust = 0.5, 
+             label = "TRAIN\n(2014-2021)", vjust = 2, hjust = 0.5, 
              color = "#2980b9", fontface = "bold", size = 3) +
     annotate("text", x = as.Date("2023-01-01"), y = Inf, 
-             label = "TEST\n(2021-2024)", vjust = 2, hjust = 0.5, 
+             label = "TEST\n(2022-2024)", vjust = 2, hjust = 0.5, 
              color = "#e67e22", fontface = "bold", size = 3) +
     
     # Facetas por país
@@ -2011,7 +2011,7 @@ if (nrow(datos_validacion_todas) > 0) {
     # Etiquetas profesionales
     labs(
       title    = "ETSIR-MSA: Validación Temporal Train/Test",
-      subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2019) y prueba (2020-2024)",
+      subtitle = "Línea roja punteada = corte entre entrenamiento (2014-2021) y prueba (2022-2024)",
       x = "Fecha", y = "Casos semanales", 
       color = "Serie", linetype = "Conjunto"
     ) +
@@ -2030,7 +2030,7 @@ if (nrow(datos_validacion_todas) > 0) {
       scale_fill_manual(values = c("Poisson" = "#3498db", "Binomial Negativa" = "#e74c3c")) +
       labs(
         title = "Comparación de AIC: Poisson vs. Binomial Negativa (Train)",
-        subtitle = "AIC calculado con train_data (2014-2019). Barra más baja = mejor ajuste.",
+        subtitle = "AIC calculado con train_data (2014-2021). Barra más baja = mejor ajuste.",
         x = NULL, y = "AIC (menor es mejor)", fill = "Distribución"
       ) +
       theme_minimal(base_size = 11) +
@@ -2082,7 +2082,7 @@ if (nrow(datos_validacion_todas) > 0) {
     mutate(
       Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
       # Sincronizado con tu corte temporal al 2021:
-      Conjunto     = ifelse(as.Date(fecha) < as.Date("2021-01-01"), "Train", "Test")
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2022-01-01"), "Train", "Test")
     )
   
   # --- 6.3.1 Gráfico de residuos vs. valores ajustados (facetado) ---
@@ -2154,7 +2154,7 @@ if (nrow(datos_validacion_todas) > 30) {
     mutate(
       Distribucion = ifelse(distribucion == "poisson", "Poisson", "Binomial Negativa"),
       # Sincronizado con tu corte temporal al 2021:
-      Conjunto     = ifelse(as.Date(fecha) < as.Date("2021-01-01"), "Train", "Test")
+      Conjunto     = ifelse(as.Date(fecha) < as.Date("2022-01-01"), "Train", "Test")
     )
   
   # Calcular ACF por país, distribución y conjunto
